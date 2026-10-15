@@ -67,7 +67,8 @@ def calibracion_estereo(obj_puntos, puntos_img_izq, puntos_img_der, imagen_size,
         "img_size": imagen_size,
         "R": R, "T": T, "E": E, "F": F}
 
-# Como queremos calcular la profundidad para cada pixel de la imagen izzquierda, debemos encontrar el mismo punto en la imagen derecha. Comoe so es costoso, lo mas util es rectificar las imagenes de forma que las lineas epipolares queden horizontales y a la misma altura
+# Como queremos calcular la profundidad para cada pixel de la imagen izzquierda, debemos encontrar el mismo punto en la imagen derecha. 
+# Comoe so es costoso, lo mas util es rectificar las imagenes de forma que las lineas epipolares queden horizontales y a la misma altura
 def rectificacion(calibracion, alpha = 0):
     K_izq, distorsion_izq = calibracion["K_izq"], calibracion["distorsion_izq"]
     K_der, distorsion_der = calibracion["K_der"], calibracion["distorsion_der"]
@@ -96,17 +97,26 @@ def rectificar(imagen_izquierda, imagen_derecha, datos_rectificacion):
 def dibujar_lineas_epipolares(imagen_izq, imagen_derecha, paso = 50, grosor = 2):
     par_img = np.hstack([imagen_izq, imagen_derecha])
 
-    for i, y in enumerate(range(0, par_img.shape[0], paso)):
-        cv2.line(par_img, (0, y), (par_img.shape[1], y), (0, 255, 255), grosor)
+    for _, y in enumerate(range(0, par_img.shape[0], paso)):
+        cv2.line(par_img, (0, y), (par_img.shape[1], y), (0, 0, 255), grosor)
 
     return par_img
-def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte = None, paso = 50, grosor = 2):
+
+def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte = None, paso = 70, grosor = 2):
     rect_izq, rect_der = rectificar(imagen_izq, imagen_der, datos_rectificacion)
 
     pares = [(imagen_izq, imagen_der), (rect_izq, rect_der)]
     if recorte is not None:
         y0, y1, x0, x1 = recorte
         pares = [(izq[y0:y1, x0:x1], der[y0:y1, x0:x1]) for izq, der in pares]
+
+    # Escala de grises solo para visualizar.
+    pares = [
+        (cv2.cvtColor(cv2.cvtColor(izq, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR, ), 
+         cv2.cvtColor(cv2.cvtColor(der, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR,),
+        )
+        for izq, der in pares
+    ]
 
     _, ax = plt.subplots(2, 1, figsize=(16, 9))
     for a, (izq, der), titulo in zip(ax, pares, ["Par original", "Par rectificado"]):
