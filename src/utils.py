@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
+## Ejercicio 1 ---------------------------------------------------------------------------------------------------------
+
 def detectar_esquinas(carpeta, esquinas_internas, cuadrado_size_milimetros):
     # Puntos 3d del tablero en su sistema dentro del checkboard de calibracion (Z = 0 porque es plano)
     cols, rows = esquinas_internas
@@ -123,5 +125,52 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
         a.imshow(cv2.cvtColor(dibujar_lineas_epipolares(izq, der, paso, grosor), cv2.COLOR_BGR2RGB))
         a.set_title(titulo)
         a.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+
+## Ejercicio 2 ---------------------------------------------------------------------------------------------------------
+def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades=128, tam_bloque=7,):
+    # Trabajamos en gris para comparar intensidades
+    gris_izq = cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2GRAY)
+    gris_der = cv2.cvtColor(imagen_der_rect, cv2.COLOR_BGR2GRAY)
+
+    # Configuración inicial tomada del tutorial 6
+    stereo = cv2.StereoSGBM_create(minDisparity=0, numDisparities=num_disparidades, blockSize=tam_bloque,)
+
+    # Penalizaciones adaptadas al tamaño del bloque
+    stereo.setP1(8 * tam_bloque**2)
+    stereo.setP2(32 * tam_bloque**2)
+    stereo.setUniquenessRatio(7)
+    stereo.setSpeckleWindowSize(512)
+    stereo.setSpeckleRange(64)
+    stereo.setDisp12MaxDiff(1)
+    stereo.setPreFilterCap(63)
+
+    # OpenCV devuelve la disparidad multiplicada por 16
+    # La convertimos a float y a unidades de píxeles
+    disparidad = stereo.compute(gris_izq, gris_der).astype(np.float32) / 16.0
+
+    return disparidad
+
+def graficar_disparidad(imagen_izq_rect, disparidad):
+    disparidad_visible = np.ma.masked_less_equal(disparidad, 0)
+
+    colores = plt.get_cmap("inferno").copy()
+    colores.set_bad("lightgray")
+
+    fig, ax = plt.subplots(1, 2, figsize=(16, 6), sharex=True, sharey=True)
+
+    ax[0].imshow(cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2RGB))
+    ax[0].set_title("Imagen izquierda rectificada")
+
+    mapa = ax[1].imshow(disparidad_visible, cmap=colores, interpolation="nearest")
+    ax[1].set_title("Mapa de disparidad")
+
+    for a in ax:
+        a.axis("off")
+
+    fig.colorbar(mapa, ax=ax[1], label="Disparidad (píxeles)", shrink=0.75)
+
     plt.tight_layout()
     plt.show()
