@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import os
 
 ## Ejercicio 1 ---------------------------------------------------------------------------------------------------------
-
 def detectar_esquinas(carpeta, esquinas_internas, cuadrado_size_milimetros):
     # Puntos 3d del tablero en su sistema dentro del checkboard de calibracion (Z = 0 porque es plano)
     cols, rows = esquinas_internas
@@ -106,7 +105,10 @@ def dibujar_lineas_epipolares(imagen_izq, imagen_derecha, paso = 50, grosor = 2)
 
 def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte = None, paso = 70, grosor = 2):
     rect_izq, rect_der = rectificar(imagen_izq, imagen_der, datos_rectificacion)
-
+    
+    titulos = ["Par original", "Par rectificado"]
+    rotulos = [('Izquierda original', 'Derecha original'), ('Izquierda rectificada', 'Derecha rectificada')]
+    
     pares = [(imagen_izq, imagen_der), (rect_izq, rect_der)]
     if recorte is not None:
         y0, y1, x0, x1 = recorte
@@ -121,16 +123,21 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
     ]
 
     _, ax = plt.subplots(2, 1, figsize=(16, 9))
-    for a, (izq, der), titulo in zip(ax, pares, ["Par original", "Par rectificado"]):
+    for a, (izq, der), titulo, (rotulo_izq, rotulo_der) in zip(ax, pares, titulos, rotulos):
         a.imshow(cv2.cvtColor(dibujar_lineas_epipolares(izq, der, paso, grosor), cv2.COLOR_BGR2RGB))
         a.set_title(titulo)
         a.axis("off")
+
+        ancho = izq.shape[1]
+        for x, texto in [(10, rotulo_izq), (ancho + 10, rotulo_der)]:
+            a.text(x, 20, texto, ha = "left", va = "top", color = "white", fontsize = 12, bbox = dict(facecolor = "black", alpha = 0.5, edgecolor = "none"))
+    
     plt.tight_layout()
     plt.show()
 
 
 ## Ejercicio 2 ---------------------------------------------------------------------------------------------------------
-def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades=128, tam_bloque=7,):
+def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades=128, tam_bloque =7,):
     # Trabajamos en gris para comparar intensidades
     gris_izq = cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2GRAY)
     gris_der = cv2.cvtColor(imagen_der_rect, cv2.COLOR_BGR2GRAY)
@@ -153,24 +160,179 @@ def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades=128, 
 
     return disparidad
 
-def graficar_disparidad(imagen_izq_rect, disparidad):
+# Definimos el valor maximo de numero de disparidad para que el mismo color en el mapa de disparidad signifique siempre la misma distancia (util al momento de compararlos)
+def graficar_disparidad(imagen_izq_rect, disparidad, max_value = 176):
     disparidad_visible = np.ma.masked_less_equal(disparidad, 0)
 
     colores = plt.get_cmap("inferno").copy()
     colores.set_bad("lightgray")
 
-    fig, ax = plt.subplots(1, 2, figsize=(16, 6), sharex=True, sharey=True)
+    fig, ax = plt.subplots(1, 2, figsize = (16, 6), sharex = True, sharey = True)
 
     ax[0].imshow(cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2RGB))
     ax[0].set_title("Imagen izquierda rectificada")
 
-    mapa = ax[1].imshow(disparidad_visible, cmap=colores, interpolation="nearest")
+    mapa = ax[1].imshow(disparidad_visible, cmap = colores, interpolation = "nearest", vmin = 0, vmax = max_value)
     ax[1].set_title("Mapa de disparidad")
 
     for a in ax:
         a.axis("off")
 
-    fig.colorbar(mapa, ax=ax[1], label="Disparidad (píxeles)", shrink=0.75)
+    fig.colorbar(mapa, ax = ax[1], label = "Disparidad (píxeles)", shrink = 0.75)
 
     plt.tight_layout()
     plt.show()
+
+def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000):
+    # Pasamos cada pixel (x,y,d) a un punto 3D (X,Y,Z) en mm, en el sistema de coordenadas de la camara izquierda rectificada
+    # para ello, usamos la matriz Q obtenida en la rectificacion estereo
+    puntos_3d = cv2.reprojectImageTo3D(disparidad, Q)
+
+    # Nos quedamos con los pixeles con disparidad positiva y no demasiado lejos (nos quedamos con los pixeles donde SGBM encontro un match valido y que corresponden a puntos reales delante de la camara a distancia finita)
+    puntos_validos = (disparidad > 0) & (puntos_3d[:, :, 2] < prof_max)
+
+    # Tenemos un array de forma (n, 3) con una fila por punto una fila por cada canal BGR
+    puntos_finales = puntos_3d[puntos_validos] 
+
+    # Como estabamos trabajando con imagenes BGR, pasamos a RGB invirtiendo (porque matplotlib toma siempre el primero como rojo, el segundo como verde y el tercero como azul ) y normalizando porque matplotlib y Open3D esperan colores en el rango [0,1]
+    colores = imagen_izq_rectificada[puntos_validos][:,::-1] / 255.0  
+
+    return puntos_finales, colores
+
+def graficar_nube_de_puntos(puntos, colores, limites = None, n_puntos = 1000000, elev = -140, azim = -70, titulo = 'Nube de puntos local en el sistema de coordenadas de la cámara izquierda'):
+    # Recortamos a una región, solo para visualizar
+    # limites = ((x_min, x_max), (y_min, y_max), (z_min, z_max)) en mm
+    if limites is not None:
+        dentro = np.ones(len(puntos), dtype = bool)
+        for eje, (minimo, maximo) in enumerate(limites):
+            dentro &= (puntos[:, eje] >= minimo) & (puntos[:, eje] <= maximo)
+        puntos, colores = puntos[dentro], colores[dentro]
+    
+    n_muestras = min(n_puntos, len(puntos))
+    indices = np.random.choice(len(puntos), n_muestras, replace = False)
+    puntos, colores = puntos[indices], colores[indices]
+
+    # matplotlib no ordena por profundidad: dibujamos primero los puntos más lejanos
+    # al observador y al final los más cercanos, para que estos queden encima
+    e, a = np.radians(elev), np.radians(azim)
+    direccion_vista = np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+    orden = np.argsort(puntos[:, 0] * direccion_vista[0] + puntos[:, 1] * direccion_vista[1] + puntos[:, 2] * direccion_vista[2])
+    puntos, colores = puntos[orden], colores[orden]
+
+    fig = plt.figure(figsize = (12, 8))
+    ax = fig.add_subplot(111, projection = '3d')
+    ax.scatter(puntos[:, 0], puntos[:, 1], puntos[:, 2], c = colores, s = 1, depthshade = False)
+
+    # Misma escala en los tres ejes
+    minimo, maximo = puntos.min(axis = 0), puntos.max(axis = 0)
+    centro = (minimo + maximo) / 2
+    radio = (maximo - minimo).max() / 2
+    ax.set_xlim(centro[0] - radio, centro[0] + radio)
+    ax.set_ylim(centro[1] - radio, centro[1] + radio)
+    ax.set_zlim(centro[2] - radio, centro[2] + radio)
+    ax.set_box_aspect((1, 1, 1))
+    
+    ax.set_xlabel('X (mm)')
+    ax.set_ylabel('Y (mm)')
+    ax.set_zlabel('Z (mm)')
+    ax.set_title(titulo)    
+    ax.view_init(elev = elev, azim = azim)
+
+    plt.show()
+
+# Ahora, debemos concentrarnos en detectar el objeto de referencia para poder estimar la pose de la camara
+def analizar_charuco(cuadrados = (9, 13), square = 42.00, marker = 31.5, diccionario = cv2.aruco.DICT_5X5_100):
+    dict_ = cv2.aruco.getPredefinedDictionary(diccionario)
+    charuco = cv2.aruco.CharucoBoard(cuadrados, square, marker, dict_)
+
+    charuco_marcadores = cv2.aruco.Board(charuco.getObjPoints(), dict_, charuco.getIds())
+
+    parametros_charuco = cv2.aruco.CharucoParameters()
+    parametros_charuco.tryRefineMarkers = True
+    detector = cv2.aruco.CharucoDetector(charuco, parametros_charuco, cv2.aruco.DetectorParameters())
+
+    return charuco, charuco_marcadores, detector
+
+def estimar_pose_camara(imagen_rectificada, K, charuco, charuco_marcadores, detector, min_esquinas = 10):
+    # Convertimos la imagen a escala de grises porque trabajamos con intensidades
+    img_gris = cv2.cvtColor(imagen_rectificada, cv2.COLOR_BGR2GRAY)
+    esquinas, ids_esquinas, marcadores, ids_marcadores = detector.detectBoard(img_gris)
+
+    # Elegimos las esquinas del ChArUco porque son las más precisas
+    if ids_esquinas is not None and len(ids_esquinas) >= min_esquinas:
+        puntos_obj, puntos_img = charuco.matchImagePoints(esquinas, ids_esquinas)
+        metodo = "charuco"
+    elif ids_marcadores is not None and len(ids_marcadores) >= 2:
+        puntos_obj, puntos_img = charuco_marcadores.matchImagePoints(marcadores, ids_marcadores)
+        metodo = "marcadores"
+
+    else:
+        return None
+
+    # En la imagen rectificada tenemos que la K es P_izq[:,:3] porque la ultima columna es la traslacion, que no exste porque la ocnsideramos en el centro del universo. La distorsion es cero porque ya rectificamos
+    hay_solucion, r, t = cv2.solvePnP(puntos_obj, puntos_img, K, None)
+    if not hay_solucion:
+        return None
+
+    # Proyectamos los puntos 3D de referencia a la imagen para calcular el error de reproyección
+    proyectados, _ = cv2.projectPoints(puntos_obj, r, t, K, None)
+    error_reproyeccion = np.sqrt(np.mean(np.sum((proyectados - puntos_img) ** 2, axis = -1)))
+
+    R, _ = cv2.Rodrigues(r)
+
+    return {"R": R, "r": r, "t": t, "error_reproyeccion": error_reproyeccion,
+            "metodo": metodo, "n_puntos": len(puntos_obj)}
+
+def transformar_nube_a_mundo(puntos, R, t):
+    # solvePnp nos da X_camara = R. X_mundo + t -> X_mundo = R.T . (X_camara - t)
+    mundo = []
+    for p in puntos:
+        # Definimos los puntos como columnas para poder hacer el producto con R.T
+        columna = p.reshape(3,1)
+        mundo.append(R.T @ (columna - t))
+    
+    return np.array(mundo).reshape(-1,3)
+
+def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_muestras = 100000, largo_eje = 80, elev = 35, azim = -60):
+    # Recorte a la zona del tablero, solo para visualizar:
+    # limites = ((x_min, x_max), (y_min, y_max), (z_min, z_max)) en mm, sistema del ChArUco
+    dentro = np.ones(len(nube), dtype = bool)
+    for eje, (minimo, maximo) in enumerate(limites):
+        dentro &= (nube[:, eje] >= minimo) & (nube[:, eje] <= maximo)
+    nube, colores = nube[dentro], colores[dentro]
+
+    # Muestra aleatoria de la nube global
+    n_muestras = min(n_muestras, len(nube))
+    indices = np.random.choice(len(nube), n_muestras, replace = False)
+
+    fig = plt.figure(figsize = (12, 9))
+    ax = fig.add_subplot(projection = "3d")
+    ax.scatter(nube[indices, 0], nube[indices, 1], nube[indices, 2], c = colores[indices], s = 0.3, depthshade = False)
+
+    for pose in poses:
+        R, t = pose["R"], pose["t"]
+        centro = (-R.T @ t).ravel()        # posición de la cámara en el mundo
+        eje_optico = R[2, :]               # dirección en la que mira la cámara (su eje Z, en el mundo)
+        ax.scatter(*centro, color = "red", s = 40)
+        ax.quiver(*centro, *eje_optico, length = largo_eje, color = "red", linewidth = 2)
+        ax.text(*centro, str(pose["indice"]), fontsize = 9)
+
+    # Ejes del sistema global (origen en la esquina del ChArUco): X rojo, Y verde, Z azul
+    for direccion, color in zip(np.eye(3), ["r", "g", "b"]):
+        ax.quiver(0, 0, 0, *direccion, length = 100, color = color, linewidth = 2)
+
+    ax.set_xlim(-300, 700)
+    ax.set_ylim(-250, 750)
+    ax.set_zlim(-500, 100)
+    ax.set_box_aspect((1000, 1000, 600))
+    ax.invert_zaxis()                      # Z del ChArUco apunta hacia la mesa: lo invertimos para ver las cámaras "arriba"
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_zlabel("Z (mm)")
+    ax.set_title("Poses de las cámaras y nube global (sistema del ChArUco)")
+    ax.view_init(elev = elev, azim = azim)
+    plt.show()
+
+
+
+
