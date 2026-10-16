@@ -335,4 +335,23 @@ def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_m
 
 
 
+import plotly.graph_objects as go   # arriba, con los otros imports
+
+def graficar_nube_interactiva(puntos, colores, n_muestras = 200000, tam_punto = 1.5, titulo = "Nube de puntos"):
+    # Muestra aleatoria para que el navegador no se trabe
+    n_muestras = min(n_muestras, len(puntos))
+    indices = np.random.choice(len(puntos), n_muestras, replace = False)
+    puntos, colores = puntos[indices], colores[indices]
+
+    # plotly espera los colores como texto "rgb(r, g, b)" con valores entre 0 y 255
+    colores_rgb = [f"rgb({int(r * 255)}, {int(g * 255)}, {int(b * 255)})" for r, g, b in colores]
+
+    fig = go.Figure(go.Scatter3d(
+        x = puntos[:, 0], y = puntos[:, 1], z = puntos[:, 2],
+        mode = "markers", marker = dict(size = tam_punto, color = colores_rgb)))
+    fig.update_layout(title = titulo, height = 700,
+                      scene = dict(aspectmode = "data",            # misma escala en los 3 ejes
+                                   xaxis_title = "X (mm)", yaxis_title = "Y (mm)", zaxis_title = "Z (mm)"))
+    fig.show()
+
 
