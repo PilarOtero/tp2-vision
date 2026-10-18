@@ -1,0 +1,202 @@
+\documentclass[a4paper,11pt]{article}
+
+% ==============================
+%   PAQUETES BÁSICOS
+% ==============================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{float}
+\setlength{\textfloatsep}{6pt}
+\setlength{\intextsep}{4pt}
+\setlength{\abovecaptionskip}{3pt}
+\setlength{\belowcaptionskip}{0pt}
+\usepackage{amsmath}
+\usepackage{minted}
+\usepackage{multicol}
+\usepackage[a4paper, top=2cm, bottom=2cm, left=2.2cm, right=2.2cm]{geometry}
+\usepackage[font=footnotesize,labelfont=bf]{caption}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{amssymb}
+\usepackage{xcolor}
+
+% ==============================
+%   CONFIGURACIONES
+% ==============================
+\hypersetup{
+    colorlinks=false,
+    %linkcolor=blue!60!black,
+    %urlcolor=blue!50!black,
+    %citecolor=blue!50!black,
+    pdfborder={0 0 0},
+    pdftitle={Trabajo Practico 2: Diaco, Pizarro Dal Maso, Otero},
+    pdfauthor={Abril Diaco, Federico Pizarro Dal Maso, Pilar Otero}
+}
+
+\titleformat{\subsection}
+  {\fontsize{12}{15}\selectfont\bfseries}
+  {\thesubsection}{1em}{}
+
+\date{}
+
+% ==============================
+%   DOCUMENTO
+% ==============================
+\begin{document}
+
+% ==============================    
+%   PORTADA + RESUMEN MULTIPÁGINA
+% ==============================
+\begin{center}
+    \includegraphics[width=0.35\linewidth]{UdeSA.png}\\[1cm]
+
+    \textbf{\LARGE Trabajo Práctico 2 - Reconstrucción 3D:}\\[0.3cm]
+
+    \Large I308 - Visión Artificial \\[1cm]
+
+    \normalsize
+    \textbf{}Abril Diaco, Pilar Otero, Federico Pizarro Dal Maso \\[0.5cm]
+    Nros. de legajo: 36763, 36584, 36389,  \\
+    \href{mailto:adiaco@udesa.edu.ar}{adiaco@udesa.edu.ar}, \href{mailto:potero@udesa.edu.ar}{potero@udesa.edu.ar}, \href{mailto:fpizarrodalmaso@udesa.edu.ar}{fpizarrodalmaso@udesa.edu.ar}
+     \\[0.8cm]
+
+    Segundo semestre 2026 \\[1.2cm]
+\end{center}
+\vspace{0.1cm}
+\setlength{\parindent}{1.2em}
+\setlength{\parskip}{0.6em}
+
+\footnotesize
+\begin{abstract}
+El objetivo de esta práctica se centra en la aplicación de técnicas de fotogrametría para la reconstrucción de la nube de puntos 3D de un objeto y la consecuente estimación de sus dimensiones métricas reales. Para ello, se utilizaron instrumentos claves: una cámara estéreo, es decir, dos camaras (izquierda y derecha) montadas a una distancia fija que se define como \textit{baseline} y un ChArUco como marco de referencia, sobre el cual se apoya el objeto que se desea reconstruir.
+
+En primer lugar, se calibró el sistema estereo a partir de imágenes de un tablero de ajedrez, estimando los parámetros intrínsecos y de distorsión de cada cámara y la posición relativa entre ambas, con un error de reproyección de [pendiente de recuperar] píxeles. A continuacion, se rectificaron los pares de imagenes para alinear sus lineas epipolares y se calcularon los mapas de disparidad, a partir de los cuales se obtuvo una nube de puntos local para cada captura. Detectando el ChArUco en cada vista se estimó la pose de la cámara, lo cual permitió llevar todas las nubes obtenidas a un mismo sistema de coordenadas común y fusionarlas. 
+
+Finalmente, la nube resultante se optimizó mediante un recorte espacial, submuestreo y eliminación de outliers, y sobre ella se estimaron las dimensiones del objeto, obteniendo [......] mm.
+\end{abstract}
+
+\normalsize
+
+\newpage
+
+\section{Introducción y Marco Teórico}
+La reconstrucción 3D mediante visión estéreo busca recuperar la geometría de una escena a partir de dos imágenes tomadas simultáneamente desde puntos de vista ligeramente distintos, de forma análoga a la visión humana. Para que esa geometría tenga sentido métrico es necesario conocer con precisión cómo cada cámara forma la imagen y cómo están ubicadas una respecto de la otra.
+
+\subsection{Modelo de cámara pinhole y distorsión}
+El modelo pinhole describe la formación de la imagen mediante una proyección central: cada punto de la escena se proyecta sobre el plano imagen a través del centro óptico. Usaremos $(x,y)$ para las coordenadas de imagen en píxeles, letras mayúsculas para las coordenadas 3D y negrita para los vectores. En coordenadas homogéneas, el modelo ideal sin distorsión se expresa como:
+
+\begin{equation}
+s \begin{bmatrix} x \\ y \\ 1 \end{bmatrix} =
+\underbrace{\begin{bmatrix} f_x & 0 & p_x \\ 0 & f_y & p_y \\ 0 & 0 & 1 \end{bmatrix}}_{K}
+\begin{bmatrix} R & \mathbf{t} \end{bmatrix}
+\begin{bmatrix} X_w \\ Y_w \\ Z_w \\ 1 \end{bmatrix}.
+\end{equation}
+Aquí, $s$ es el factor de escala homogénea y $[R\,|\,\mathbf{t}]$ representa la transformación del mundo a la cámara. Denotamos el punto 3D en el mundo por $\mathbf{X}_w=(X_w,Y_w,Z_w)^\top$ y sus coordenadas en la cámara por $\mathbf{X}_{\mathrm{cam}}=(X_{\mathrm{cam}},Y_{\mathrm{cam}},Z_{\mathrm{cam}})^\top=R\mathbf{X}_w+\mathbf{t}$. La matriz $K$ contiene los \textbf{parámetros intrínsecos}: las distancias focales $f_x,f_y$ expresadas en píxeles y el punto principal $(p_x,p_y)$, donde el eje óptico interseca el plano imagen. Se asumen ejes del sensor perpendiculares, por lo que el parámetro \textit{skew} es nulo.
+
+Las lentes reales introducen deformaciones que el modelo pinhole no contempla. Para describirlas utilizamos las coordenadas normalizadas ideales, sin unidades,
+\begin{equation}
+x_n = \frac{X_{\mathrm{cam}}}{Z_{\mathrm{cam}}}, \qquad
+y_n = \frac{Y_{\mathrm{cam}}}{Z_{\mathrm{cam}}}, \qquad
+r^2 = x_n^2+y_n^2.
+\end{equation}
+El subíndice $n$ permite distinguir estas coordenadas de los píxeles $(x,y)$. La \textbf{distorsión radial} depende de la distancia $r$ al eje óptico en el plano normalizado y puede hacer que las líneas rectas se observen como curvas:
+\begin{equation}
+x_{n,r} = x_n\,(1+k_1r^2+k_2r^4+k_3r^6), \qquad
+y_{n,r} = y_n\,(1+k_1r^2+k_2r^4+k_3r^6).
+\end{equation}
+La \textbf{distorsión tangencial}, asociada a la desalineación de la lente respecto del sensor, agrega los desplazamientos:
+\begin{equation}
+\Delta x_{n,t} = 2p_1x_ny_n+p_2(r^2+2x_n^2), \qquad
+\Delta y_{n,t} = p_1(r^2+2y_n^2)+2p_2x_ny_n.
+\end{equation}
+El modelo completo combina ambos efectos: $x_{n,d}=x_{n,r}+\Delta x_{n,t}$ e $y_{n,d}=y_{n,r}+\Delta y_{n,t}$. Estas coordenadas normalizadas distorsionadas se convierten a píxeles mediante $x_d=f_x\,x_{n,d}+p_x$ e $y_d=f_y\,y_{n,d}+p_y$. Los coeficientes $p_1,p_2$ de distorsión tangencial son distintos de las coordenadas $p_x,p_y$ del punto principal.
+
+\textbf{Calibrar} consiste en estimar los parámetros intrínsecos y de distorsión. Estos varían entre cámaras, incluso del mismo modelo, y son necesarios para relacionar los píxeles con los rayos 3D de la escena. La calibración se realiza fotografiando un patrón de geometría conocida, como un tablero de ajedrez, desde distintas posiciones y buscando los parámetros que mejor explican las posiciones observadas de sus esquinas.
+
+\subsection{Calibración estéreo y error de reproyección}
+En un sistema estéreo se estiman, además, los \textbf{parámetros extrínsecos relativos}: la rotación $R$ y la traslación $\mathbf{T}$ que llevan un punto del sistema de la cámara izquierda al de la derecha:
+\begin{equation}
+\mathbf{X}_{\mathrm{der}} = R\,\mathbf{X}_{\mathrm{izq}} + \mathbf{T}.
+\end{equation}
+En esta sección, $R$ representa la rotación relativa fija entre ambas cámaras; en una pose mundo--cámara, $R$ representa la rotación de esa captura. Distinguimos ambas traslaciones usando $\mathbf{T}$ para la relación entre cámaras y $\mathbf{t}$ para la pose respecto del mundo. El \textbf{baseline} se representa siempre con $b$ y es la distancia entre los centros ópticos:
+\begin{equation}
+b = \|\mathbf{T}\|.
+\end{equation}
+La transformación relativa describe la geometría del par y permite rectificar las imágenes y triangular puntos. La escala métrica queda determinada por las dimensiones físicas del patrón utilizadas al calibrar.
+
+La estimación se realiza a partir de pares de imágenes del tablero observado simultáneamente por ambas cámaras. Conociendo las coordenadas 3D de sus esquinas y sus posiciones detectadas en cada imagen, se plantea un problema de cuadrados mínimos no lineales que ajusta los parámetros de cámara, las poses del tablero y la transformación relativa $(R,\mathbf{T})$, que se mantiene fija para todos los pares.
+
+El \textbf{error de reproyección} compara la posición detectada de cada esquina con su proyección según los parámetros estimados. Su valor RMS, expresado en píxeles, es:
+\begin{equation}
+E_{\mathrm{RMS}} = \sqrt{\frac{1}{N}\sum_{i,j}
+\left\lVert \mathbf{x}_{ij}-\hat{\mathbf{x}}_{ij} \right\rVert^2}.
+\end{equation}
+Aquí, $\mathbf{x}_{ij}=(x_{ij},y_{ij})^\top$ es la posición observada del punto $i$ en la imagen $j$, $\hat{\mathbf{x}}_{ij}$ es su posición proyectada y $N$ es la cantidad total de observaciones 2D incluidas en la suma. Un error bajo indica un buen ajuste a los datos utilizados, aunque no garantiza por sí solo la precisión métrica de toda la reconstrucción.
+
+\subsection{Geometría epipolar y rectificación}
+Dado un punto en la imagen izquierda, el punto 3D que lo generó puede ubicarse a distintas profundidades sobre el rayo que pasa por el centro óptico izquierdo. En el modelo sin distorsión, la proyección de ese rayo en la imagen derecha define una recta, la \textbf{línea epipolar}, sobre la que se encuentra el punto correspondiente.
+
+Representamos las coordenadas en píxeles de un punto y su correspondiente mediante $(x,y)$ y $(x',y')$, respectivamente. Sus representaciones homogéneas son $\tilde{\mathbf{x}}=(x,y,1)^\top$ y $\tilde{\mathbf{x}}'=(x',y',1)^\top$. La restricción epipolar se expresa mediante la matriz fundamental $F$:
+\begin{equation}
+(\tilde{\mathbf{x}}')^\top F\,\tilde{\mathbf{x}} = 0.
+\end{equation}
+Esta relación se aplica a coordenadas sin distorsión y reduce la búsqueda de correspondencias de dos dimensiones a una. Antes de rectificar, las líneas epipolares no necesariamente son horizontales ni están a la misma altura; además, la distorsión puede hacer que se observen como curvas en las imágenes originales.
+
+La \textbf{rectificación}, junto con la corrección de distorsión, transforma las imágenes para que las líneas epipolares queden horizontales y alineadas en nuestro sistema estéreo. Puede interpretarse como un giro virtual de las cámaras, sin modificar su posición física. En las imágenes rectificadas, los puntos correspondientes cumplen idealmente $y=y'$, por lo que la búsqueda se limita a comparar las posiciones horizontales $x$ y $x'$. En la sección siguiente, estas coordenadas se refieren a las imágenes ya rectificadas. La matriz fundamental de la ecuación anterior corresponde al sistema de imágenes sin distorsión considerado allí y cambia al cambiar las proyecciones mediante la rectificación.
+
+\subsection{De la disparidad a la profundidad}
+En un par de imágenes rectificadas, la \textbf{disparidad} es la diferencia entre las coordenadas horizontales de un mismo punto en las imágenes izquierda y derecha:
+\begin{equation}
+d = x-x'.
+\end{equation}
+Para un sistema estéreo horizontal rectificado con puntos principales coincidentes, como el utilizado en este trabajo, la semejanza de triángulos permite obtener:
+\begin{equation}
+d = \frac{fb}{Z}, \qquad Z = \frac{fb}{d},
+\end{equation}
+donde $f$ es la distancia focal horizontal de las imágenes rectificadas en píxeles, $b$ es el baseline y $Z$ es la profundidad en el sistema de la cámara izquierda rectificada. Como $d$ también se expresa en píxeles, al utilizar $b$ en milímetros obtenemos $Z$ en milímetros. La profundidad es inversamente proporcional a la disparidad: los puntos cercanos presentan disparidades mayores y los más lejanos, disparidades menores.
+
+\section{Metodología}
+RESPONDER:
+Describan brevemente el pipeline implementado, mencionando en cada etapa:
+●
+Calibración: la herramienta utilizada (tool de la cátedra o funciones de OpenCV).
+●
+Disparidad: método elegido (SGBM, red neuronal, etc.) y parámetros ajustados.
+
+●
+●
+○
+¿Cómo estimaron la pose con
+`solvePnP`? ¿Qué representa el vector de
+Rodrigues? ¿Qué cuenta hicieron para encontrar la nube de puntos en el
+sistema de referencia global?
+Fusión y Optimización de nube de puntos en Open3D. Describan los pasos de
+optimización usados y parámetros elegidos justificando.
+Medición métrica: ¿Cómo midieron el objeto? ¿Por qué es posible tener un resultado
+métrico (y no tenemos el problema de reconstruir salvo por una escala?
+-- PENDIENTE DE REDACCIÓN: se descartaron las disparidades no positivas antes de reconstruir. Esto elimina el valor inválido de SGBM para el rango usado y evita profundidades no positivas o divisiones por cero en el modelo $Z=fb/d$; una disparidad positiva no garantiza por sí sola una correspondencia correcta.
+\section{Resultados y Discusión}
+EN RESULTADOS RESPONDER:
+Se propone presentar evidencia visual y cuantitativa de cada etapa del pipeline.
+Ejemplos:
+● Calibración: parámetros obtenidos, error RMS, figura comparando un ejemplo de par
+estéreo original vs. rectificado.
+● Disparidad: mapa de disparidad de al menos un par representativo, visualización de
+nube local.
+● Pose y marco global: visualización de las poses de cámara estimadas superpuestas
+con el marco de referencia global. Verificación de coherencia con el movimiento real
+de captura.
+● Nube global y optimización: nube de puntos antes y después de optimizar, en cada
+paso (bounding box → voxel → outliers). Incluir cantidad de puntos sobrevivientes en
+cada etapa.
+● Medición métrica: tamaño estimado del objeto en milímetros, indicando método de
+medición utilizado, y comparación con el tamaño real si se conoce (reportando error
+relativo).
+
+EN DISCUSION RESPONDER:
+Se propone un análisis crítico de los resultados obtenidos, incluyendo problemas
+encontrados en el pipeline, limitaciones del método, y posibles mejoras.
+\end{document}

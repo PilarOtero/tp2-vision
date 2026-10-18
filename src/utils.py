@@ -137,7 +137,7 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
     plt.show()
 
 
-## Ejercicio 2 ---------------------------------------------------------------------------------------------------------
+# Ejercicio 2 ---------------------------------------------------------------------------------------------------------
 def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades=128, tam_bloque =7,):
     # Trabajamos en gris para comparar intensidades
     gris_izq = cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2GRAY)
