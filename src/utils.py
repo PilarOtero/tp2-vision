@@ -277,6 +277,9 @@ def estimar_pose_camara(imagen_rectificada, K, charuco, charuco_marcadores, dete
 
     # Proyectamos los puntos 3D de referencia a la imagen para calcular el error de reproyección
     proyectados, _ = cv2.projectPoints(puntos_obj, r, t, K, None)
+    # Llevamos ambos a forma (n, 2): segun la version de OpenCV pueden venir como (n, 1, 2) o (n, 2),
+    # y si las formas no coinciden numpy hace broadcasting y el error da cualquier cosa sin avisar
+    proyectados, puntos_img = proyectados.reshape(-1, 2), puntos_img.reshape(-1, 2)
     error_reproyeccion = np.sqrt(np.mean(np.sum((proyectados - puntos_img) ** 2, axis = -1)))
 
     R, _ = cv2.Rodrigues(r)
@@ -284,15 +287,20 @@ def estimar_pose_camara(imagen_rectificada, K, charuco, charuco_marcadores, dete
     return {"R": R, "r": r, "t": t, "error_reproyeccion": error_reproyeccion,
             "metodo": metodo, "n_puntos": len(puntos_obj)}
 
-def transformar_nube_a_mundo(puntos, R, t):
-    # solvePnp nos da X_camara = R. X_mundo + t -> X_mundo = R.T . (X_camara - t)
-    mundo = []
-    for p in puntos:
-        # Definimos los puntos como columnas para poder hacer el producto con R.T
-        columna = p.reshape(3,1)
-        mundo.append(R.T @ (columna - t))
-    
-    return np.array(mundo).reshape(-1,3)
+# def transformar_nube_a_mundo(puntos, R, t):
+#     # solvePnp nos da X_camara = R. X_mundo + t -> X_mundo = R.T . (X_camara - t)
+#     mundo = []
+#     for p in puntos:
+#         # Definimos los puntos como columnas para poder hacer el producto con R.T
+#         columna = p.reshape(3,1)
+#         mundo.append(R.T @ (columna - t))
+#
+#     return np.array(mundo).reshape(-1,3)
+
+def transformar_nube_a_mundo_optimizada(puntos, R, t):
+    # Misma cuenta, X_mundo = R.T . (X_camara - t), pero para todos los puntos a la vez.
+    # Con los puntos como filas (n, 3): (R.T . (X - t)).T = (X - t).T . R, asi que alcanza con multiplicar por R a derecha
+    return (puntos - t.reshape(1, 3)) @ R
 
 def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_muestras = 100000, largo_eje = 80, elev = 35, azim = -60):
     # Recorte a la zona del tablero, solo para visualizar:
@@ -339,4 +347,89 @@ def draw_geometries(geometries, note = True, **kwargs):
         o3d.visualization.draw_plotly(geometries, **kwargs)
     else:
         o3d.visualization.draw_geometries(geometries, **kwargs)
+
+
+## Ejercicio 3 ---------------------------------------------------------------------------------------------------------
+def crear_nube_open3d(puntos, colores):
+    # Open3D trabaja con float64, por eso convertimos (nuestras nubes estaban en float32 para ahorrar memoria)
+    nube = o3d.geometry.PointCloud()
+    nube.points = o3d.utility.Vector3dVector(np.asarray(puntos, dtype = np.float64))
+    nube.colors = o3d.utility.Vector3dVector(np.asarray(colores, dtype = np.float64))
+
+    return nube
+
+def crear_caja(centro, extension, angulo_z = 0):
+    # Caja orientada en el sistema del ChArUco: como el objeto esta apoyado sobre el tablero, alcanza con girarla alrededor de Z
+    # centro = (x, y, z) y extension = (largo, ancho, alto) en mm, angulo_z en grados
+    R = o3d.geometry.get_rotation_matrix_from_xyz((0, 0, np.radians(angulo_z)))
+    caja = o3d.geometry.OrientedBoundingBox(np.asarray(centro, dtype = np.float64), R, np.asarray(extension, dtype = np.float64))
+    caja.color = (1, 0, 0)
+
+    return caja
+
+def filtrar_por_caja(nube, caja):
+    # Nos quedamos solo con los puntos que caen dentro de la caja, el resto (mesa, tablero, fondo) se descarta
+    indices = caja.get_point_indices_within_bounding_box(nube.points)
+
+    return nube.select_by_index(indices)
+
+def optimizar_nube(nube, caja, tam_voxel = 1.0, vecinos = 30, std_ratio = 2.0, print_ = True):
+    # Guardamos la nube de cada etapa para poder compararlas y reportar los puntos sobrevivientes
+    etapas = {"Original": nube}
+
+    # 1. Filtrado espacial: descartamos todo lo que no es el objeto
+    etapas["Caja"] = filtrar_por_caja(nube, caja)
+
+    # 2. Submuestreo: un solo punto por voxel (cubo de lado tam_voxel mm), promediando posicion y color.
+    # Elimina la redundancia de tener la misma zona vista desde muchas capturas
+    etapas["Voxel"] = etapas["Caja"].voxel_down_sample(voxel_size = tam_voxel)
+
+    # 3. Outliers: descartamos los puntos cuya distancia media a sus vecinos es mucho mayor que la del resto
+    # (mas de std_ratio desvios estandar por encima del promedio), es decir, los puntos "flotantes"
+    etapas["Outliers"], _ = etapas["Voxel"].remove_statistical_outlier(nb_neighbors = vecinos, std_ratio = std_ratio)
+
+    if print_:
+        for nombre, etapa in etapas.items():
+            print(f"{nombre}: {len(etapa.points):,} puntos ({100 * len(etapa.points) / len(nube.points):.2f}% del original)")
+
+    return etapas
+
+def graficar_etapas(etapas, n_puntos = 100000, elev = 30, azim = -60):
+    # Una vista por etapa (sin la original, que tiene toda la escena), con la misma escala para poder compararlas
+    nombres = [nombre for nombre in etapas if nombre != "Original"]
+    fig = plt.figure(figsize = (6 * len(nombres), 6))
+
+    # Tomamos los limites de la primera etapa (la mas grande) para todas
+    referencia = np.asarray(etapas[nombres[0]].points)
+    centro = (referencia.min(axis = 0) + referencia.max(axis = 0)) / 2
+    radio = (referencia.max(axis = 0) - referencia.min(axis = 0)).max() / 2
+
+    for i, nombre in enumerate(nombres):
+        puntos, colores = np.asarray(etapas[nombre].points), np.asarray(etapas[nombre].colors)
+
+        # Muestra aleatoria, solo para visualizar
+        indices = np.random.choice(len(puntos), min(n_puntos, len(puntos)), replace = False)
+
+        ax = fig.add_subplot(1, len(nombres), i + 1, projection = "3d")
+        ax.scatter(puntos[indices, 0], puntos[indices, 1], puntos[indices, 2], c = colores[indices], s = 0.5, depthshade = False)
+
+        ax.set_xlim(centro[0] - radio, centro[0] + radio)
+        ax.set_ylim(centro[1] - radio, centro[1] + radio)
+        ax.set_zlim(centro[2] - radio, centro[2] + radio)
+        ax.set_box_aspect((1, 1, 1))
+        ax.invert_zaxis()                  # Z del ChArUco apunta hacia la mesa: lo invertimos para ver el objeto "parado"
+        ax.set_xlabel("X (mm)")
+        ax.set_ylabel("Y (mm)")
+        ax.set_zlabel("Z (mm)")
+        ax.set_title(f"{nombre}: {len(puntos):,} puntos")
+        ax.view_init(elev = elev, azim = azim)
+
+    plt.tight_layout()
+    plt.show()
+
+def exportar_ply(nube, ruta):
+    # write_ascii = False -> formato binario, mucho mas liviano que el de texto
+    os.makedirs(os.path.dirname(ruta) or ".", exist_ok = True)
+    o3d.io.write_point_cloud(ruta, nube, write_ascii = False)
+    print(f"Nube guardada en {ruta} ({os.path.getsize(ruta) / 1e6:.1f} MB)")
 
