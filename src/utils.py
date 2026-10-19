@@ -185,6 +185,32 @@ def graficar_disparidad(imagen_izq_rect, disparidad, max_value = 176):
     plt.tight_layout()
     plt.show()
 
+def probar_sgbm(
+    imagen_izq_rect, imagen_der_rect,
+    num_disparidades, tam_bloque,
+    uniqueness, speckle_window, speckle_range
+):
+    parametros_prueba = {
+        "num_disparidades": num_disparidades,
+        "tam_bloque": tam_bloque,
+        "uniqueness": uniqueness,
+        "speckle_window": speckle_window,
+        "speckle_range": speckle_range,
+    }
+
+    disparidad_prueba = calcular_disparidad(
+        imagen_izq_rect, imagen_der_rect, **parametros_prueba
+    )
+
+    porcentaje = 100 * np.mean(disparidad_prueba > 0)
+    print(f"Píxeles con disparidad positiva: {porcentaje:.1f}%")
+    print("Parámetros probados:", parametros_prueba)
+
+    graficar_disparidad(
+        imagen_izq_rect, disparidad_prueba, max_value=256
+    )
+
+
 def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000):
     # Pasamos cada pixel (x,y,d) a un punto 3D (X,Y,Z) en mm, en el sistema de coordenadas de la camara izquierda rectificada
     # para ello, usamos la matriz Q obtenida en la rectificacion estereo
