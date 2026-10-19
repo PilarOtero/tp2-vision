@@ -95,7 +95,8 @@ def rectificar(imagen_izquierda, imagen_derecha, datos_rectificacion):
 
     return rectificacion_izq, rectificacion_der
 
-# Dibujamos las lineas epipolares para verificar que la rectificacion fue correcta. Si lo fue, deben quedar horizontalmente paralelas
+# Dibujamos guías horizontales para comparar la altura de puntos correspondientes.
+# En el par original no representan las líneas epipolares calculadas.
 def dibujar_lineas_epipolares(imagen_izq, imagen_derecha, paso = 50, grosor = 2):
     par_img = np.hstack([imagen_izq, imagen_derecha])
 
@@ -118,7 +119,7 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
     # Escala de grises solo para visualizar.
     pares = [
         (cv2.cvtColor(cv2.cvtColor(izq, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR, ), 
-         cv2.cvtColor(cv2.cvtColor(der, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR,),
+         cv2.cvtColor(cv2.cvtColor(der, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR),
         )
         for izq, der in pares
     ]
@@ -138,20 +139,20 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
 
 
 # Ejercicio 2 ---------------------------------------------------------------------------------------------------------
-def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades=128, tam_bloque =7,):
+def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_bloque, uniqueness, speckle_window, speckle_range):
     # Trabajamos en gris para comparar intensidades
     gris_izq = cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2GRAY)
     gris_der = cv2.cvtColor(imagen_der_rect, cv2.COLOR_BGR2GRAY)
 
     # Configuración inicial tomada del tutorial 6
-    stereo = cv2.StereoSGBM_create(minDisparity=0, numDisparities=num_disparidades, blockSize=tam_bloque,)
+    stereo = cv2.StereoSGBM_create(minDisparity=0, numDisparities=num_disparidades, blockSize=tam_bloque)
 
     # Penalizaciones adaptadas al tamaño del bloque
     stereo.setP1(8 * tam_bloque**2)
     stereo.setP2(32 * tam_bloque**2)
-    stereo.setUniquenessRatio(7)
-    stereo.setSpeckleWindowSize(512)
-    stereo.setSpeckleRange(64)
+    stereo.setUniquenessRatio(uniqueness)
+    stereo.setSpeckleWindowSize(speckle_window)
+    stereo.setSpeckleRange(speckle_range)
     stereo.setDisp12MaxDiff(1)
     stereo.setPreFilterCap(63)
 
@@ -188,9 +189,17 @@ def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000)
     # Pasamos cada pixel (x,y,d) a un punto 3D (X,Y,Z) en mm, en el sistema de coordenadas de la camara izquierda rectificada
     # para ello, usamos la matriz Q obtenida en la rectificacion estereo
     puntos_3d = cv2.reprojectImageTo3D(disparidad, Q)
-
-    # Nos quedamos con los pixeles con disparidad positiva y no demasiado lejos (nos quedamos con los pixeles donde SGBM encontro un match valido y que corresponden a puntos reales delante de la camara a distancia finita)
-    puntos_validos = (disparidad > 0) & (puntos_3d[:, :, 2] < prof_max)
+    
+    # Descartamos disparidades no positivas, coordenadas no finitas
+    # y profundidades fuera del rango de trabajo.
+    # Esta máscara no garantiza que las correspondencias sean correctas.
+    puntos_validos = (
+        np.isfinite(disparidad)
+        & (disparidad > 0)
+        & np.isfinite(puntos_3d).all(axis=2)
+        & (puntos_3d[:, :, 2] > 0)
+        & (puntos_3d[:, :, 2] < prof_max)
+    )
 
     # Tenemos un array de forma (n, 3) con una fila por punto una fila por cada canal BGR
     puntos_finales = puntos_3d[puntos_validos] 
@@ -334,7 +343,7 @@ def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_m
     ax.set_ylim(-250, 750)
     ax.set_zlim(-500, 100)
     ax.set_box_aspect((1000, 1000, 600))
-    ax.invert_zaxis()                      # Z del ChArUco apunta hacia la mesa: lo invertimos para ver las cámaras "arriba"
+    ax.invert_zaxis() # Z del ChArUco apunta hacia la mesa: lo invertimos para ver las cámaras "arriba"
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.set_zlabel("Z (mm)")
@@ -349,7 +358,7 @@ def draw_geometries(geometries, note = True, **kwargs):
         o3d.visualization.draw_geometries(geometries, **kwargs)
 
 
-## Ejercicio 3 ---------------------------------------------------------------------------------------------------------
+#Ejercicio 3 ---------------------------------------------------------------------------------------------------------
 def crear_nube_open3d(puntos, colores):
     # Open3D trabaja con float64, por eso convertimos (nuestras nubes estaban en float32 para ahorrar memoria)
     nube = o3d.geometry.PointCloud()
