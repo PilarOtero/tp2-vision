@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 ## Ejercicio 1 ---------------------------------------------------------------------------------------------------------
 def detectar_esquinas(carpeta, esquinas_internas, cuadrado_size_milimetros):
@@ -418,11 +419,35 @@ def crear_nube_open3d(puntos, colores):
 def crear_caja(centro, extension, angulo_z = 0):
     # Caja orientada en el sistema del ChArUco: como el objeto esta apoyado sobre el tablero, alcanza con girarla alrededor de Z
     # centro = (x, y, z) y extension = (largo, ancho, alto) en mm, angulo_z en grados
-    R = o3d.geometry.get_rotation_matrix_from_xyz((0, 0, np.radians(angulo_z)))
-    caja = o3d.geometry.OrientedBoundingBox(np.asarray(centro, dtype = np.float64), R, np.asarray(extension, dtype = np.float64))
-    caja.color = (1, 0, 0)
+    a = np.radians(angulo_z)
+    R = np.array([[np.cos(a), -np.sin(a), 0],
+                  [np.sin(a),  np.cos(a), 0],
+                  [0,          0,         1]])
+
+    # Armamos las 8 esquinas: centro +/- media extension en cada eje, rotadas con R.
+    # (El constructor OrientedBoundingBox(centro, R, extension) y caja.color se caen con numpy 2, por eso usamos create_from_points)
+    signos = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], dtype = np.float64)
+    esquinas = np.asarray(centro, dtype = np.float64) + (signos * np.asarray(extension, dtype = np.float64) / 2) @ R.T
+    caja = o3d.geometry.OrientedBoundingBox.create_from_points(o3d.utility.Vector3dVector(esquinas))
 
     return caja
+
+def caja_para_graficar(caja, color = (1.0, 0.0, 0.0)):
+    # Aristas de la caja como lineas, pintadas del color pedido
+    lineas = o3d.geometry.LineSet.create_from_oriented_bounding_box(caja)
+    lineas.colors = o3d.utility.Vector3dVector(np.tile(color, (len(lineas.lines), 1)))
+
+    return lineas
+
+def crear_ejes(largo = 100):
+    # Ejes del sistema global (origen en la esquina del ChArUco) como lineas: X rojo, Y verde, Z azul.
+    # (create_coordinate_frame se cae con numpy 2, por eso los armamos a mano)
+    ejes = o3d.geometry.LineSet()
+    ejes.points = o3d.utility.Vector3dVector(np.array([[0, 0, 0], [largo, 0, 0], [0, largo, 0], [0, 0, largo]], dtype = np.float64))
+    ejes.lines = o3d.utility.Vector2iVector(np.array([[0, 1], [0, 2], [0, 3]], dtype = np.int32))
+    ejes.colors = o3d.utility.Vector3dVector(np.eye(3))
+
+    return ejes
 
 def filtrar_por_caja(nube, caja):
     # Nos quedamos solo con los puntos que caen dentro de la caja, el resto (mesa, tablero, fondo) se descarta
@@ -439,19 +464,77 @@ def refinar_con_icp(nube, referencia, distancia_max = 5.0, tam_voxel = 2.0):
     if not referencia.has_normals():
         referencia.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius = 3 * tam_voxel, max_nn = 30))
 
+    # Las funciones de registro de Open3D (registration_icp, evaluate_registration) se caen con numpy 2,
+    # asi que implementamos ICP con numpy, usando un KD-tree de scipy para buscar el vecino mas cercano
+    puntos_origen = np.asarray(origen.points)
+    puntos_ref, normales_ref = np.asarray(referencia.points), np.asarray(referencia.normals)
+    arbol = cKDTree(puntos_ref)
+
     # Calidad de la alineacion antes de ICP: la nube ya esta en el sistema del ChArUco, asi que partimos de la identidad
-    antes = o3d.pipelines.registration.evaluate_registration(origen, referencia, distancia_max, np.eye(4))
+    fitness_antes, rmse_antes = evaluar_alineacion(puntos_origen, arbol, distancia_max)
 
     # Solo se emparejan puntos a menos de distancia_max mm, por eso ICP solo corrige desfasajes chicos
-    despues = o3d.pipelines.registration.registration_icp(
-        origen, referencia, distancia_max, np.eye(4),
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration = 50))
+    T = icp_punto_a_plano(puntos_origen, puntos_ref, normales_ref, arbol, distancia_max, max_iteraciones = 50)
+
+    puntos_alineados = puntos_origen @ T[:3, :3].T + T[:3, 3]
+    fitness, rmse = evaluar_alineacion(puntos_alineados, arbol, distancia_max)
 
     # fitness: fraccion de puntos que encontraron un par, rmse: distancia media (en mm) entre los pares
-    return {"T": despues.transformation,
-            "fitness_antes": antes.fitness, "rmse_antes": antes.inlier_rmse,
-            "fitness": despues.fitness, "rmse": despues.inlier_rmse}
+    return {"T": T,
+            "fitness_antes": fitness_antes, "rmse_antes": rmse_antes,
+            "fitness": fitness, "rmse": rmse}
+
+def evaluar_alineacion(puntos, arbol, distancia_max):
+    # Para cada punto buscamos el mas cercano de la referencia; los que estan a mas de distancia_max no tienen par
+    distancias, _ = arbol.query(puntos, distance_upper_bound = distancia_max)
+    con_par = np.isfinite(distancias)
+    if not con_par.any():
+        return 0.0, 0.0
+
+    # fitness: fraccion de puntos con par, rmse: raiz del error cuadratico medio de esos pares (mm)
+    return con_par.mean(), np.sqrt(np.mean(distancias[con_par] ** 2))
+
+def icp_punto_a_plano(puntos, puntos_ref, normales_ref, arbol, distancia_max, max_iteraciones = 50, tolerancia = 1e-6):
+    # Busca la transformacion rigida T (4x4) que lleva "puntos" sobre la superficie de la referencia.
+    # En cada iteracion: 1) emparejamos cada punto con el mas cercano de la referencia,
+    # 2) calculamos el movimiento que minimiza la distancia de cada punto al plano tangente de su par,
+    # 3) aplicamos ese movimiento y repetimos hasta que deja de cambiar
+    T = np.eye(4)
+    actuales = puntos.copy()
+
+    for _ in range(max_iteraciones):
+        # 1) Correspondencias (solo pares a menos de distancia_max mm)
+        distancias, indices = arbol.query(actuales, distance_upper_bound = distancia_max)
+        con_par = np.isfinite(distancias)
+        if con_par.sum() < 6:
+            break
+        p, q, n = actuales[con_par], puntos_ref[indices[con_par]], normales_ref[indices[con_par]]
+
+        # Centramos para que el sistema este bien condicionado (las coordenadas son de cientos de mm)
+        centro = p.mean(axis = 0)
+        p_c, q_c = p - centro, q - centro
+
+        # 2) Error punto a plano: ((R p + t - q) · n). Para rotaciones chicas R ≈ I + [w]x, y queda lineal en (w, t):
+        #    (p x n) · w + n · t = (q - p) · n  ->  lo resolvemos por cuadrados minimos
+        A = np.hstack([np.cross(p_c, n), n])
+        b = np.sum((q_c - p_c) * n, axis = 1)
+        x, *_ = np.linalg.lstsq(A, b, rcond = None)
+        w, t = x[:3], x[3:]
+
+        # Rotacion a partir del vector w (forma de Rodrigues), aplicada alrededor del centro
+        R_inc, _ = cv2.Rodrigues(w)
+        t_inc = centro + t - R_inc @ centro
+
+        # 3) Aplicamos el incremento y lo acumulamos en T
+        actuales = actuales @ R_inc.T + t_inc
+        T_inc = np.eye(4)
+        T_inc[:3, :3], T_inc[:3, 3] = R_inc, t_inc
+        T = T_inc @ T
+
+        if np.linalg.norm(x) < tolerancia:
+            break
+
+    return T
 
 def alinear_capturas_icp(nubes, colores, poses, caja, error_max_referencia = 1.5, distancia_max = 5.0, tam_voxel = 2.0, traslacion_max = 15.0, rotacion_max = 5.0, print_ = True):
     # Recortamos cada captura a la zona del objeto: el fondo no aporta y el tablero solo, al ser un plano, deja a ICP "deslizarse"
