@@ -211,6 +211,28 @@ def probar_sgbm(
     )
 
 
+def filtrar_bordes_disparidad(disparidad, Q, umbral = 8.0, ventana = 5):
+    # En los bordes de los objetos SGBM mezcla el fondo con el frente y da disparidades intermedias: esos pixeles
+    # quedan como puntos "flotantes" entre el objeto y lo que esta detras. Los detectamos como pixeles cuya
+    # profundidad cambia mucho dentro de una ventana chica (mas de umbral mm entre el mas cercano y el mas lejano)
+    validos = disparidad > 0
+
+    # Profundidad de cada pixel a partir de Q: Z = Q[2,3] / (Q[3,2] * d + Q[3,3])
+    Z = np.zeros_like(disparidad, dtype = np.float32)
+    Z[validos] = Q[2, 3] / (Q[3, 2] * disparidad[validos] + Q[3, 3])
+
+    # Maxima y minima profundidad en la ventana alrededor de cada pixel (dilatacion y erosion).
+    # Los pixeles invalidos no deben contar: valen 0 para el maximo y un valor enorme para el minimo
+    nucleo = np.ones((ventana, ventana), np.uint8)
+    Z_max = cv2.dilate(Z, nucleo)
+    Z_min = cv2.erode(np.where(validos, Z, 1e9).astype(np.float32), nucleo)
+
+    # Marcamos como invalidos (disparidad negativa, igual que SGBM) los pixeles en un salto de profundidad
+    filtrada = disparidad.copy()
+    filtrada[validos & (Z_max - Z_min > umbral)] = -1
+
+    return filtrada
+
 def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000):
     # Pasamos cada pixel (x,y,d) a un punto 3D (X,Y,Z) en mm, en el sistema de coordenadas de la camara izquierda rectificada
     # para ello, usamos la matriz Q obtenida en la rectificacion estereo
@@ -408,6 +430,92 @@ def filtrar_por_caja(nube, caja):
 
     return nube.select_by_index(indices)
 
+# Opcional: refinamiento de las poses con ICP
+def refinar_con_icp(nube, referencia, distancia_max = 5.0, tam_voxel = 2.0):
+    # Bajamos la resolucion para que ICP sea rapido (la transformacion despues se aplica a la nube completa)
+    origen = nube.voxel_down_sample(voxel_size = tam_voxel)
+
+    # Point-to-plane minimiza la distancia de cada punto al plano tangente de su par en la referencia, por eso necesita sus normales
+    if not referencia.has_normals():
+        referencia.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius = 3 * tam_voxel, max_nn = 30))
+
+    # Calidad de la alineacion antes de ICP: la nube ya esta en el sistema del ChArUco, asi que partimos de la identidad
+    antes = o3d.pipelines.registration.evaluate_registration(origen, referencia, distancia_max, np.eye(4))
+
+    # Solo se emparejan puntos a menos de distancia_max mm, por eso ICP solo corrige desfasajes chicos
+    despues = o3d.pipelines.registration.registration_icp(
+        origen, referencia, distancia_max, np.eye(4),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration = 50))
+
+    # fitness: fraccion de puntos que encontraron un par, rmse: distancia media (en mm) entre los pares
+    return {"T": despues.transformation,
+            "fitness_antes": antes.fitness, "rmse_antes": antes.inlier_rmse,
+            "fitness": despues.fitness, "rmse": despues.inlier_rmse}
+
+def alinear_capturas_icp(nubes, colores, poses, caja, error_max_referencia = 1.5, distancia_max = 5.0, tam_voxel = 2.0, traslacion_max = 15.0, rotacion_max = 5.0, print_ = True):
+    # Recortamos cada captura a la zona del objeto: el fondo no aporta y el tablero solo, al ser un plano, deja a ICP "deslizarse"
+    recortes = [filtrar_por_caja(crear_nube_open3d(n, c), caja) for n, c in zip(nubes, colores)]
+
+    # Referencia: unimos las capturas mas confiables (esquinas ChArUco con error de reproyeccion bajo)
+    referencia = o3d.geometry.PointCloud()
+    for recorte, pose in zip(recortes, poses):
+        if pose["metodo"] == "charuco" and pose["error_reproyeccion"] < error_max_referencia:
+            referencia += recorte
+    referencia = referencia.voxel_down_sample(voxel_size = tam_voxel)
+
+    nubes_corregidas, resultados = [], []
+    for nube, recorte, pose in zip(nubes, recortes, poses):
+        resultado = refinar_con_icp(recorte, referencia, distancia_max, tam_voxel)
+
+        # Tamaño de la correccion: cuanto se movio la nube y cuanto giro (angulo de la rotacion a partir de su traza)
+        T = resultado["T"]
+        resultado["traslacion"] = np.linalg.norm(T[:3, 3])
+        resultado["rotacion"] = np.degrees(np.arccos(np.clip((np.trace(T[:3, :3]) - 1) / 2, -1, 1)))
+
+        # Aceptamos la correccion solo si mejora la alineacion (mas puntos con par y a menor distancia) y si es chica:
+        # ICP es un refinamiento de la pose de solvePnP, una correccion grande indica que convergio a una solucion equivocada
+        mejora = resultado["fitness"] >= resultado["fitness_antes"] and resultado["rmse"] <= resultado["rmse_antes"]
+        chica = resultado["traslacion"] <= traslacion_max and resultado["rotacion"] <= rotacion_max
+        resultado["aceptada"] = mejora and chica
+        if not resultado["aceptada"]:
+            T = np.eye(4)
+
+        # Aplicamos la correccion a la nube completa: X' = R . X + t, con los puntos como filas
+        nubes_corregidas.append((nube @ T[:3, :3].T + T[:3, 3]).astype(np.float32))
+        resultados.append({"indice": pose["indice"], "metodo": pose["metodo"], **resultado})
+
+        if print_:
+            print(f"Captura {pose['indice']} ({pose['metodo']}): fitness {resultado['fitness_antes']:.2f} -> {resultado['fitness']:.2f}, "
+                  f"rmse {resultado['rmse_antes']:.2f} -> {resultado['rmse']:.2f} mm, "
+                  f"correccion {resultado['traslacion']:.1f} mm y {resultado['rotacion']:.2f}°{'' if resultado['aceptada'] else ' (descartada)'}")
+
+    return nubes_corregidas, resultados
+
+def graficar_corte(nubes, caja, ancho = 4.0, n_puntos = 50000):
+    # Corte transversal: nos quedamos con una franja fina en el medio de la caja, a lo ancho del objeto,
+    # y la miramos de costado. Si las capturas no estan bien alineadas, la superficie se ve "doble"
+    fig, ax = plt.subplots(1, len(nubes), figsize = (7 * len(nubes), 5), sharex = True, sharey = True)
+    ax = np.atleast_1d(ax)
+
+    for a, (nombre, nube) in zip(ax, nubes.items()):
+        # Pasamos los puntos al sistema de la caja: eje 0 a lo largo, eje 1 a lo ancho, eje 2 en altura
+        puntos = (np.asarray(nube.points) - caja.center) @ caja.R
+        colores = np.asarray(nube.colors)
+        franja = np.abs(puntos[:, 0]) < ancho / 2
+
+        indices = np.flatnonzero(franja)
+        indices = np.random.choice(indices, min(n_puntos, len(indices)), replace = False)
+
+        a.scatter(puntos[indices, 1], -puntos[indices, 2], c = colores[indices], s = 1)
+        a.set_aspect("equal")
+        a.set_xlabel("Ancho (mm)")
+        a.set_ylabel("Altura (mm, desde el centro de la caja)")
+        a.set_title(f"{nombre}: corte de {ancho:.0f} mm")
+
+    plt.tight_layout()
+    plt.show()
+
 def optimizar_nube(nube, caja, tam_voxel = 1.0, vecinos = 30, std_ratio = 2.0, print_ = True):
     # Guardamos la nube de cada etapa para poder compararlas y reportar los puntos sobrevivientes
     etapas = {"Original": nube}
@@ -467,4 +575,69 @@ def exportar_ply(nube, ruta):
     os.makedirs(os.path.dirname(ruta) or ".", exist_ok = True)
     o3d.io.write_point_cloud(ruta, nube, write_ascii = False)
     print(f"Nube guardada en {ruta} ({os.path.getsize(ruta) / 1e6:.1f} MB)")
+
+# Opcional: normales y mallado de superficie con Poisson
+def estimar_normales(nube, radio = 6.0, max_vecinos = 30, vecinos_orientacion = 15):
+    # La normal de cada punto es la direccion perpendicular al plano que mejor ajusta a sus vecinos
+    # (los que estan a menos de radio mm, hasta max_vecinos)
+    nube.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius = radio, max_nn = max_vecinos))
+
+    # El ajuste del plano no define el sentido de la normal (puede apuntar hacia afuera o hacia adentro del objeto).
+    # Las orientamos para que sean coherentes entre vecinos, recorriendo la superficie de punto en punto
+    nube.orient_normals_consistent_tangent_plane(vecinos_orientacion)
+
+    # Ese recorrido puede dejarlas todas al reves: la parte de arriba del objeto tiene que mirar hacia arriba,
+    # que en el sistema del ChArUco es -Z. Si en promedio miran hacia +Z, las invertimos todas
+    puntos, normales = np.asarray(nube.points), np.asarray(nube.normals)
+    arriba = puntos[:, 2] < np.percentile(puntos[:, 2], 10)
+    if normales[arriba, 2].mean() > 0:
+        nube.normals = o3d.utility.Vector3dVector(-normales)
+
+    return nube
+
+def crear_malla_poisson(nube, profundidad = 7, percentil_densidad = 5, caja = None, fraccion_min_componente = 0.01, iteraciones_suavizado = 20, print_ = True):
+    # Poisson busca una superficie cerrada cuyas normales coincidan con las de la nube.
+    # profundidad: niveles del octree que discretiza el espacio. Cada nivel divide las celdas a la mitad, asi que
+    # el lado de la celda es aprox. el tamaño del objeto / 2^profundidad. Con mas profundidad hay mas detalle,
+    # pero si la celda es mas chica que el ruido de la nube, la malla copia ese ruido
+    malla, densidades = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(nube, depth = profundidad)
+    densidades = np.asarray(densidades)
+    if print_:
+        print(f"Malla de Poisson: {len(malla.triangles):,} triangulos")
+
+    # Como la superficie es cerrada, Poisson "inventa" caras donde no habia puntos (por ejemplo, debajo de la suela).
+    # La densidad indica cuantos puntos respaldan cada vertice: eliminamos los de densidad mas baja
+    malla.remove_vertices_by_mask(densidades < np.percentile(densidades, percentil_densidad))
+    if print_:
+        print(f"Sin vertices de baja densidad: {len(malla.triangles):,} triangulos")
+
+    # Recortamos con la misma caja que la nube, para descartar lo que quede por debajo del tablero
+    if caja is not None:
+        malla = malla.crop(caja)
+        if print_:
+            print(f"Recorte con la caja: {len(malla.triangles):,} triangulos")
+
+    # Eliminamos los pedazos sueltos: componentes conexas con menos del fraccion_min_componente de los triangulos
+    componentes, triangulos_por_componente, _ = malla.cluster_connected_triangles()
+    componentes, triangulos_por_componente = np.asarray(componentes), np.asarray(triangulos_por_componente)
+    malla.remove_triangles_by_mask(triangulos_por_componente[componentes] < fraccion_min_componente * len(malla.triangles))
+    malla.remove_unreferenced_vertices()
+    if print_:
+        print(f"Sin componentes chicas: {len(malla.triangles):,} triangulos")
+
+    # Suavizado de Taubin: alterna un paso que acerca cada vertice al promedio de sus vecinos y otro que lo aleja un poco,
+    # asi suaviza las irregularidades chicas sin "encoger" la malla (como si pasa con el suavizado laplaciano)
+    if iteraciones_suavizado > 0:
+        malla = malla.filter_smooth_taubin(number_of_iterations = iteraciones_suavizado)
+
+    # Normales de la malla, para que se vea con iluminacion
+    malla.compute_vertex_normals()
+
+    return malla
+
+def exportar_malla(malla, ruta):
+    # Igual que con la nube, formato binario
+    os.makedirs(os.path.dirname(ruta) or ".", exist_ok = True)
+    o3d.io.write_triangle_mesh(ruta, malla, write_ascii = False)
+    print(f"Malla guardada en {ruta} ({os.path.getsize(ruta) / 1e6:.1f} MB)")
 
