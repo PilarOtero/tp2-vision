@@ -84,4 +84,4 @@ Open3D 0.18 (la última versión disponible para Python 3.9) está compilado par
 - El ICP está implementado con numpy y `scipy.spatial.cKDTree` (`icp_punto_a_plano`, `evaluar_alineacion`), porque `registration_icp` y `evaluate_registration` no funcionan.
 - Los colores siempre se pasan a Open3D envueltos en `o3d.utility.Vector3dVector`.
 
-En Mac, numpy 2 también puede mostrar avisos `RuntimeWarning: divide by zero / overflow encountered in matmul` en productos de matrices. Son falsos (un problema conocido de la librería Accelerate) y no afectan los resultados.
+En Mac, numpy 2 también puede mostrar avisos `RuntimeWarning: divide by zero / overflow encountered in matmul` en productos de matrices. Son falsos (un problema de la librería Accelerate) y no afectan los resultados.

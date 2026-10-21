@@ -68,6 +68,8 @@ def calibracion_estereo(obj_puntos, puntos_img_izq, puntos_img_der, imagen_size,
         "K_izq": K_izq, "distorsion_izq": distorsion_izq,
         "K_der": K_der, "distorsion_der": distorsion_der,
         "img_size": imagen_size,
+        "error_der": error_der, "error_izq": error_izq,
+        "error_estereo": error_estereo,
         "R": R, "T": T, "E": E, "F": F}
 
 # Como queremos calcular la profundidad para cada pixel de la imagen izzquierda, debemos encontrar el mismo punto en la imagen derecha. 
@@ -117,7 +119,7 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
         y0, y1, x0, x1 = recorte
         pares = [(izq[y0:y1, x0:x1], der[y0:y1, x0:x1]) for izq, der in pares]
 
-    # Escala de grises solo para visualizar.
+    # Escala de grises solo para visualizar
     pares = [
         (cv2.cvtColor(cv2.cvtColor(izq, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR, ), 
          cv2.cvtColor(cv2.cvtColor(der, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR),
@@ -186,11 +188,7 @@ def graficar_disparidad(imagen_izq_rect, disparidad, max_value = 176):
     plt.tight_layout()
     plt.show()
 
-def probar_sgbm(
-    imagen_izq_rect, imagen_der_rect,
-    num_disparidades, tam_bloque,
-    uniqueness, speckle_window, speckle_range
-):
+def probar_sgbm(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_bloque, uniqueness, speckle_window, speckle_range):
     parametros_prueba = {
         "num_disparidades": num_disparidades,
         "tam_bloque": tam_bloque,
@@ -199,18 +197,13 @@ def probar_sgbm(
         "speckle_range": speckle_range,
     }
 
-    disparidad_prueba = calcular_disparidad(
-        imagen_izq_rect, imagen_der_rect, **parametros_prueba
-    )
+    disparidad_prueba = calcular_disparidad(imagen_izq_rect, imagen_der_rect, **parametros_prueba)
 
     porcentaje = 100 * np.mean(disparidad_prueba > 0)
     print(f"Píxeles con disparidad positiva: {porcentaje:.1f}%")
     print("Parámetros probados:", parametros_prueba)
 
-    graficar_disparidad(
-        imagen_izq_rect, disparidad_prueba, max_value=256
-    )
-
+    graficar_disparidad(imagen_izq_rect, disparidad_prueba, max_value = 256)
 
 def filtrar_bordes_disparidad(disparidad, Q, umbral = 8.0, ventana = 5):
     # En los bordes de los objetos SGBM mezcla el fondo con el frente y da disparidades intermedias: esos pixeles
@@ -345,20 +338,11 @@ def estimar_pose_camara(imagen_rectificada, K, charuco, charuco_marcadores, dete
     return {"R": R, "r": r, "t": t, "error_reproyeccion": error_reproyeccion,
             "metodo": metodo, "n_puntos": len(puntos_obj)}
 
-# def transformar_nube_a_mundo(puntos, R, t):
-#     # solvePnp nos da X_camara = R. X_mundo + t -> X_mundo = R.T . (X_camara - t)
-#     mundo = []
-#     for p in puntos:
-#         # Definimos los puntos como columnas para poder hacer el producto con R.T
-#         columna = p.reshape(3,1)
-#         mundo.append(R.T @ (columna - t))
-#
-#     return np.array(mundo).reshape(-1,3)
-
 def transformar_nube_a_mundo_optimizada(puntos, R, t):
-    # Misma cuenta, X_mundo = R.T . (X_camara - t), pero para todos los puntos a la vez.
-    # Con los puntos como filas (n, 3): (R.T . (X - t)).T = (X - t).T . R, asi que alcanza con multiplicar por R a derecha
-    return (puntos - t.reshape(1, 3)) @ R
+    # solvePnp nos da X_camara = R. X_mundo + t -> X_mundo = R.T . (X_camara - t) -> hacemos la cuenta para todos los puntos a la vez
+    # Con los puntos como filas (n, 3): (R.T . (X_camara - t)).T = (X_camara - t).T . R, asi que alcanza con multiplicar por R a derecha
+    with np.errstate(divide = "ignore", over = "ignore", invalid = "ignore"):
+        return (puntos - t.reshape(1, 3)) @ R
 
 def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_muestras = 100000, largo_eje = 80, elev = 35, azim = -60):
     # Recorte a la zona del tablero, solo para visualizar:
@@ -407,7 +391,7 @@ def draw_geometries(geometries, note = True, **kwargs):
         o3d.visualization.draw_geometries(geometries, **kwargs)
 
 
-#Ejercicio 3 ---------------------------------------------------------------------------------------------------------
+# Ejercicio 3 ---------------------------------------------------------------------------------------------------------
 def crear_nube_open3d(puntos, colores):
     # Open3D trabaja con float64, por eso convertimos (nuestras nubes estaban en float32 para ahorrar memoria)
     nube = o3d.geometry.PointCloud()
@@ -416,43 +400,79 @@ def crear_nube_open3d(puntos, colores):
 
     return nube
 
-def crear_caja(centro, extension, angulo_z = 0):
-    # Caja orientada en el sistema del ChArUco: como el objeto esta apoyado sobre el tablero, alcanza con girarla alrededor de Z
+def crear_caja(centro, extension, angulo_z:int = 0):
+    # Caja orientada en el sistema del ChArUco: como la zapatilla está apoyada en diagonal sobre el tablero, alcanza con girarla alrededor de Z
     # centro = (x, y, z) y extension = (largo, ancho, alto) en mm, angulo_z en grados
     a = np.radians(angulo_z)
     R = np.array([[np.cos(a), -np.sin(a), 0],
                   [np.sin(a),  np.cos(a), 0],
                   [0,          0,         1]])
 
-    # Armamos las 8 esquinas: centro +/- media extension en cada eje, rotadas con R.
-    # (El constructor OrientedBoundingBox(centro, R, extension) y caja.color se caen con numpy 2, por eso usamos create_from_points)
+    # Armamos las 8 esquinas: centro +/- la mitad del tamaño en cada eje, rotadas con R.
+    # El constructor OrientedBoundingBox(centro, R, extension) y caja.color se caen con la versión de numpy que usamos, por eso usamos create_from_points
     signos = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], dtype = np.float64)
     esquinas = np.asarray(centro, dtype = np.float64) + (signos * np.asarray(extension, dtype = np.float64) / 2) @ R.T
-    caja = o3d.geometry.OrientedBoundingBox.create_from_points(o3d.utility.Vector3dVector(esquinas))
 
+    # Creamos la caja usando la función de Open3D
+    caja = o3d.geometry.OrientedBoundingBox.create_from_points(o3d.utility.Vector3dVector(esquinas))
     return caja
 
-def caja_para_graficar(caja, color = (1.0, 0.0, 0.0)):
-    # Aristas de la caja como lineas, pintadas del color pedido
+def caja_para_graficar(caja:o3d.geometry.OrientedBoundingBox, color:tuple[float] = (1.0, 0.0, 0.0)) -> o3d.geometry.LineSet:
+    """
+    Convierte las 12 aristas de la caja en lineas y les asigna el color rojo, envuelto en el Vector3dVector
+    
+    Parámetros:
+        caja(o3d.geometry.OrientedBoundingBox): prisma rectangular imaginario que encierra la zapatilla
+        color(tuple de float): color RGB de las aristas, con valores entre 0 y 1
+
+    Retorna:
+        lineas(o3d.geometry.LineSet): las 8 esquinas de la caja y los 12 segmentos que las unen, pintados del color indicado
+    """
+    # Armamos el esqueleto de la caja conectando las 8 esquinas, lo cual "genera" 12 segmentos
     lineas = o3d.geometry.LineSet.create_from_oriented_bounding_box(caja)
+    # Asignamos el color rojo (Vector3dVector) a los 12 segmentos
     lineas.colors = o3d.utility.Vector3dVector(np.tile(color, (len(lineas.lines), 1)))
 
     return lineas
 
-def crear_ejes(largo = 100):
-    # Ejes del sistema global (origen en la esquina del ChArUco) como lineas: X rojo, Y verde, Z azul.
+def crear_ejes(largo:int = 100) -> o3d.geometry.LineSet:
+    """
+    Construye ejes del sistema global (origen en la esquina del ChArUco) como lineas.
+    Para ello, arma 4 puntos: el origen y un punto a largo mm sobre cada eje. Luego, se los une con 3 lineas: X rojo, Y verde, Z azul
+
+    Parámetros:
+        largo(float): distancia en mm del origen a la que se ubica el punto sobre caja eje (largo de cada eje dibujado)
+    Retorna:
+        ejes(o3d.geometry.LineSet): los 4 puntos y los 3 segmentos que forman los ejes X, Y y Z, cada uno con su color
+    """
     # (create_coordinate_frame se cae con numpy 2, por eso los armamos a mano)
     ejes = o3d.geometry.LineSet()
+
+    # Definimos los 4 puntos a utilizar: el origen (indice 0), un punto a largo mm sobre X (indice 1), otro sobre Y (indice 2) y otro sobre Z (indice 3)
     ejes.points = o3d.utility.Vector3dVector(np.array([[0, 0, 0], [largo, 0, 0], [0, largo, 0], [0, 0, largo]], dtype = np.float64))
+    
+    # 3 segmentos, indicados por los indices de los puntos que unen: origen-X, origen-Y, origen-Z
     ejes.lines = o3d.utility.Vector2iVector(np.array([[0, 1], [0, 2], [0, 3]], dtype = np.int32))
+    # Definimos un color según el segmento utilizando la Identidad -> (1,0,0) = rojo, (0,1,0) = verde, (0,0,1) = azul
     ejes.colors = o3d.utility.Vector3dVector(np.eye(3))
 
     return ejes
 
-def filtrar_por_caja(nube, caja):
-    # Nos quedamos solo con los puntos que caen dentro de la caja, el resto (mesa, tablero, fondo) se descarta
-    indices = caja.get_point_indices_within_bounding_box(nube.points)
+def filtrar_por_caja(nube:o3d.geometry.PointCloud, caja:o3d.geometry.OrientedBoundingBox) -> o3d.geometry.PointCloud:
+    """
+    Filtrado espacial: se queda solo con los puntos de la nube que caen dentro de la caja.
+    El resto (mesa, tablero, fondo y ruido) se descarta.
 
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube de puntos a filtrar
+        caja (o3d.geometry.OrientedBoundingBox): caja que encierra la zona de interés
+    
+    Retorna:
+        nube_filtrada (o3d.geometry.PointCloud): nueva nube con solo los puntos de adentro de la caja (con sus colores)
+    """
+    # Lista con las posiciones (indices) de los puntos que caen dentro de la caja
+    indices = caja.get_point_indices_within_bounding_box(nube.points)
+    # Armamos una nube nueva solo con esos puntos. La nube original no se modifica
     return nube.select_by_index(indices)
 
 # Opcional: refinamiento de las poses con ICP
