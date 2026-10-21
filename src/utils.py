@@ -1120,3 +1120,99 @@ def exportar_malla(malla, ruta):
     o3d.io.write_triangle_mesh(ruta, malla, write_ascii = False)
     print(f"Malla guardada en {ruta} ({os.path.getsize(ruta) / 1e6:.1f} MB)")
 
+# Medición métrica -----------------------------------------------------------------------------------------------------
+def medir_altura(nube, percentiles = (97.5, 99, 99.5)):
+    """
+    Calcula alturas respecto del tablero Z = 0, con el objeto del lado negativo de Z.
+
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube final en el sistema del tablero, en mm.
+        percentiles (tuple): percentiles de altura a consultar, entre 0 y 100.
+
+    Retorna:
+        dict: altura_maxima_mm y percentiles_mm; estos últimos no son un margen de error.
+
+    Errores:
+        ValueError: si la nube está vacía, contiene valores no finitos o los percentiles son inválidos.
+    """
+    puntos = np.asarray(nube.points)
+    if len(puntos) == 0:
+        raise ValueError("La nube final está vacía.")
+    if not np.isfinite(puntos).all():
+        raise ValueError("La nube final contiene coordenadas no finitas.")
+
+    alturas = -puntos[:, 2]
+    valores = np.percentile(alturas, percentiles)
+    return {
+        "altura_maxima_mm": float(alturas.max()),
+        "percentiles_mm": dict(zip(percentiles, valores)),
+    }
+
+
+def graficar_alturas_laterales(puntos, percentil = 99, paso = 10):
+    """
+    Muestra dos vistas laterales y destaca el máximo y los puntos sobre el percentil elegido.
+
+    Parámetros:
+        puntos (np.ndarray): coordenadas (N, 3) de una nube no vacía, en mm, con altura = -Z.
+        percentil (float): percentil de altura que define los puntos destacados.
+        paso (int): dibuja uno de cada paso puntos del fondo; debe ser positivo.
+
+    Retorna:
+        None: muestra las vistas X-altura e Y-altura, sin modificar los puntos.
+    """
+    alturas = -puntos[:, 2]
+    superiores = alturas > np.percentile(alturas, percentil)
+    indice_max = np.argmax(alturas)
+    fig, axes = plt.subplots(1, 2, figsize = (12, 5))
+
+    for ax, eje, nombre in zip(axes, (0, 1), ("X", "Y")):
+        ax.scatter(puntos[::paso, eje], alturas[::paso], s = 1, color = "lightgray")
+        ax.scatter(puntos[superiores, eje], alturas[superiores], s = 3, color = "red",
+                   label = f"{100 - percentil:g} % de puntos más altos")
+        ax.scatter(puntos[indice_max, eje], alturas[indice_max], s = 120, marker = "*",
+                   color = "blue", label = "Máximo")
+        ax.axhline(0, color = "black", linewidth = 1)
+        ax.set_xlabel(f"{nombre} (mm)")
+        ax.set_ylabel("Altura sobre el tablero (mm)")
+        ax.set_yticks(np.arange(0, 160, 10))
+        ax.grid(axis = "y", alpha = 0.3)
+        ax.set_aspect("equal", adjustable = "box")
+
+    axes[1].legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def graficar_alturas_superiores(puntos, percentil = 99, paso = 5):
+    """
+    Muestra la nube desde arriba, coloreada por altura, y destaca sus puntos más altos.
+
+    Parámetros:
+        puntos (np.ndarray): coordenadas (N, 3) de una nube no vacía, en mm, con altura = -Z.
+        percentil (float): percentil de altura que define los puntos destacados.
+        paso (int): dibuja uno de cada paso puntos del fondo; debe ser positivo.
+
+    Retorna:
+        None: muestra la vista X-Y con el máximo y los puntos sobre el percentil.
+    """
+    alturas = -puntos[:, 2]
+    superiores = alturas > np.percentile(alturas, percentil)
+    indice_max = np.argmax(alturas)
+    plt.figure(figsize = (6, 7))
+    plt.scatter(puntos[::paso, 0], puntos[::paso, 1], c = alturas[::paso], s = 1, cmap = "viridis")
+    plt.colorbar(label = "Altura sobre el tablero (mm)")
+    plt.scatter(puntos[superiores, 0], puntos[superiores, 1], s = 2, color = "red",
+                label = f"{100 - percentil:g} % de puntos más altos")
+    plt.scatter(puntos[indice_max, 0], puntos[indice_max, 1], s = 150, marker = "*",
+                color = "blue", label = "Máximo")
+    plt.gca().set_aspect("equal")
+    plt.gca().invert_yaxis()
+    plt.xlabel("X (mm)")
+    plt.ylabel("Y (mm)")
+    plt.title("Vista superior de la nube final")
+    plt.yticks(np.arange(100, 451, 50))
+    plt.xticks(np.arange(0, 351, 50))
+    plt.grid(alpha = 0.3)
+    plt.legend()
+    plt.show()
