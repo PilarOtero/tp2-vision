@@ -5,8 +5,19 @@ import os
 import open3d as o3d
 from scipy.spatial import cKDTree
 
-## Ejercicio 1 ---------------------------------------------------------------------------------------------------------
+# Ejercicio 1 ---------------------------------------------------------------------------------------------------------
 def detectar_esquinas(carpeta, esquinas_internas, cuadrado_size_milimetros):
+    """
+    Detecta y refina las esquinas del tablero en los pares estéreo válidos.
+
+    Parámetros:
+        carpeta (str): carpeta con las imágenes left_*.jpg y right_*.jpg.
+        esquinas_internas (tuple): cantidad de esquinas internas (columnas, filas).
+        cuadrado_size_milimetros (float): lado de cada cuadrado en mm.
+
+    Retorna:
+        tuple: puntos 3D del tablero, puntos 2D izquierdos y derechos, y tamaño (ancho, alto) en píxeles.
+    """
     # Puntos 3d del tablero en su sistema dentro del checkboard de calibracion (Z = 0 porque es plano)
     cols, rows = esquinas_internas
     posiciones_objetos = np.zeros((rows * cols, 3), np.float32)
@@ -47,6 +58,19 @@ def detectar_esquinas(carpeta, esquinas_internas, cuadrado_size_milimetros):
     return obj_puntos, puntos_img_izq, puntos_img_der, image_size
 
 def calibracion_estereo(obj_puntos, puntos_img_izq, puntos_img_der, imagen_size, print_ = False):
+    """
+    Calibra ambas cámaras y estima la transformación de izquierda a derecha.
+
+    Parámetros:
+        obj_puntos (list): coordenadas 3D conocidas del tablero en mm, por captura.
+        puntos_img_izq (list): esquinas detectadas en la imagen izquierda, en píxeles.
+        puntos_img_der (list): esquinas detectadas en la imagen derecha, en píxeles.
+        imagen_size (tuple): tamaño (ancho, alto) de las imágenes en píxeles.
+        print_ (bool): indica si se muestran los errores RMS y el baseline.
+
+    Retorna:
+        dict: intrínsecos, distorsión, R, T en mm, E, F, tamaño de imagen y errores RMS en píxeles.
+    """
     # Calibración de la cámara izquierda, None ya que estimamos K y la distorsion desde 0
     error_izq, K_izq, distorsion_izq, _, _ = cv2.calibrateCamera(obj_puntos, puntos_img_izq, imagen_size, None, None)
 
@@ -75,6 +99,16 @@ def calibracion_estereo(obj_puntos, puntos_img_izq, puntos_img_der, imagen_size,
 # Como queremos calcular la profundidad para cada pixel de la imagen izzquierda, debemos encontrar el mismo punto en la imagen derecha. 
 # Comoe so es costoso, lo mas util es rectificar las imagenes de forma que las lineas epipolares queden horizontales y a la misma altura
 def rectificacion(calibracion, alpha = 0):
+    """
+    Calcula las matrices y los mapas para rectificar un par estéreo.
+
+    Parámetros:
+        calibracion (dict): parámetros de ambas cámaras, R, T y tamaño de imagen.
+        alpha (float): 0 recorta bordes inválidos; 1 conserva todo el campo original.
+
+    Retorna:
+        dict: rotaciones, proyecciones, matriz Q y mapas de rectificación de ambas cámaras.
+    """
     K_izq, distorsion_izq = calibracion["K_izq"], calibracion["distorsion_izq"]
     K_der, distorsion_der = calibracion["K_der"], calibracion["distorsion_der"]
     R, T, size_img = calibracion["R"], calibracion["T"], calibracion["img_size"]
@@ -93,6 +127,17 @@ def rectificacion(calibracion, alpha = 0):
         "mapa_der": (mapa_der_x, mapa_der_y)}
 
 def rectificar(imagen_izquierda, imagen_derecha, datos_rectificacion):
+    """
+    Corrige la distorsión y rectifica las dos imágenes usando los mapas guardados.
+
+    Parámetros:
+        imagen_izquierda (np.ndarray): imagen original izquierda.
+        imagen_derecha (np.ndarray): imagen original derecha.
+        datos_rectificacion (dict): mapas de ambas cámaras, en mapa_izq y mapa_der.
+
+    Retorna:
+        tuple: imágenes izquierda y derecha rectificadas, como arrays.
+    """
     rectificacion_izq = cv2.remap(imagen_izquierda, *datos_rectificacion["mapa_izq"], cv2.INTER_LINEAR)
     rectificacion_der = cv2.remap(imagen_derecha, *datos_rectificacion["mapa_der"], cv2.INTER_LINEAR)
 
@@ -101,6 +146,18 @@ def rectificar(imagen_izquierda, imagen_derecha, datos_rectificacion):
 # Dibujamos guías horizontales para comparar la altura de puntos correspondientes.
 # En el par original no representan las líneas epipolares calculadas.
 def dibujar_lineas_epipolares(imagen_izq, imagen_derecha, paso = 50, grosor = 2):
+    """
+    Une las imágenes y dibuja guías horizontales; no calcula las líneas epipolares.
+
+    Parámetros:
+        imagen_izq (np.ndarray): imagen izquierda en BGR.
+        imagen_derecha (np.ndarray): imagen derecha en BGR, de la misma altura.
+        paso (int): separación entre guías en píxeles.
+        grosor (int): ancho de las líneas en píxeles.
+
+    Retorna:
+        np.ndarray: par de imágenes en BGR con guías rojas.
+    """
     par_img = np.hstack([imagen_izq, imagen_derecha])
 
     for _, y in enumerate(range(0, par_img.shape[0], paso)):
@@ -109,6 +166,20 @@ def dibujar_lineas_epipolares(imagen_izq, imagen_derecha, paso = 50, grosor = 2)
     return par_img
 
 def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte = None, paso = 70, grosor = 2):
+    """
+    Compara los pares original y rectificado en gris, con guías horizontales.
+
+    Parámetros:
+        imagen_izq (np.ndarray): imagen original izquierda en BGR.
+        imagen_der (np.ndarray): imagen original derecha en BGR.
+        datos_rectificacion (dict): mapas de rectificación de ambas cámaras.
+        recorte (tuple o None): límites (y0, y1, x0, x1) para la visualización.
+        paso (int): separación entre guías en píxeles.
+        grosor (int): ancho de las guías en píxeles.
+
+    Retorna:
+        None: muestra la figura.
+    """
     rect_izq, rect_der = rectificar(imagen_izq, imagen_der, datos_rectificacion)
     
     titulos = ["Par original", "Par rectificado"]
@@ -143,6 +214,21 @@ def graficar_rectificacion(imagen_izq, imagen_der, datos_rectificacion, recorte 
 
 # Ejercicio 2 ---------------------------------------------------------------------------------------------------------
 def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_bloque, uniqueness, speckle_window, speckle_range):
+    """
+    Calcula la disparidad con SGBM sobre las imágenes convertidas a gris.
+
+    Parámetros:
+        imagen_izq_rect (np.ndarray): imagen izquierda rectificada en BGR.
+        imagen_der_rect (np.ndarray): imagen derecha rectificada en BGR.
+        num_disparidades (int): amplitud de búsqueda, múltiplo de 16, en píxeles.
+        tam_bloque (int): lado impar del bloque de comparación, en píxeles.
+        uniqueness (int): margen porcentual para aceptar la mejor correspondencia.
+        speckle_window (int): tamaño máximo de regiones aisladas a eliminar; 0 desactiva el filtro.
+        speckle_range (int): variación de disparidad permitida dentro de esas regiones, en píxeles.
+
+    Retorna:
+        np.ndarray: mapa float32 en píxeles; -1 indica disparidades inválidas para el rango usado.
+    """
     # Trabajamos en gris para comparar intensidades
     gris_izq = cv2.cvtColor(imagen_izq_rect, cv2.COLOR_BGR2GRAY)
     gris_der = cv2.cvtColor(imagen_der_rect, cv2.COLOR_BGR2GRAY)
@@ -167,6 +253,17 @@ def calcular_disparidad(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_
 
 # Definimos el valor maximo de numero de disparidad para que el mismo color en el mapa de disparidad signifique siempre la misma distancia (util al momento de compararlos)
 def graficar_disparidad(imagen_izq_rect, disparidad, max_value = 176):
+    """
+    Muestra la imagen izquierda y la disparidad; los valores no positivos quedan en gris.
+
+    Parámetros:
+        imagen_izq_rect (np.ndarray): imagen izquierda rectificada en BGR.
+        disparidad (np.ndarray): mapa de disparidad en píxeles.
+        max_value (float): límite superior de la escala de colores, en píxeles.
+
+    Retorna:
+        None: muestra la figura.
+    """
     disparidad_visible = np.ma.masked_less_equal(disparidad, 0)
 
     colores = plt.get_cmap("inferno").copy()
@@ -189,6 +286,21 @@ def graficar_disparidad(imagen_izq_rect, disparidad, max_value = 176):
     plt.show()
 
 def probar_sgbm(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_bloque, uniqueness, speckle_window, speckle_range):
+    """
+    Prueba una configuración SGBM y muestra el mapa y el porcentaje de disparidades positivas.
+
+    Parámetros:
+        imagen_izq_rect (np.ndarray): imagen izquierda rectificada en BGR.
+        imagen_der_rect (np.ndarray): imagen derecha rectificada en BGR.
+        num_disparidades (int): amplitud de búsqueda, múltiplo de 16, en píxeles.
+        tam_bloque (int): lado impar del bloque de comparación, en píxeles.
+        uniqueness (int): margen porcentual para aceptar la mejor correspondencia.
+        speckle_window (int): tamaño máximo de regiones aisladas a eliminar; 0 desactiva el filtro.
+        speckle_range (int): variación de disparidad permitida dentro de esas regiones, en píxeles.
+
+    Retorna:
+        None: imprime los parámetros y la cobertura, y muestra la figura.
+    """
     parametros_prueba = {
         "num_disparidades": num_disparidades,
         "tam_bloque": tam_bloque,
@@ -206,6 +318,18 @@ def probar_sgbm(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_bloque, 
     graficar_disparidad(imagen_izq_rect, disparidad_prueba, max_value = 256)
 
 def filtrar_bordes_disparidad(disparidad, Q, umbral = 8.0, ventana = 5):
+    """
+    Marca con -1 las disparidades próximas a saltos grandes de profundidad.
+
+    Parámetros:
+        disparidad (np.ndarray): mapa de disparidad en píxeles.
+        Q (np.ndarray): matriz de reproyección 4x4 con escala en mm.
+        umbral (float): diferencia máxima de profundidad en la ventana, en mm.
+        ventana (int): lado de la ventana de comparación en píxeles.
+
+    Retorna:
+        np.ndarray: copia del mapa con los píxeles descartados marcados como inválidos.
+    """
     # En los bordes de los objetos SGBM mezcla el fondo con el frente y da disparidades intermedias: esos pixeles
     # quedan como puntos "flotantes" entre el objeto y lo que esta detras. Los detectamos como pixeles cuya
     # profundidad cambia mucho dentro de una ventana chica (mas de umbral mm entre el mas cercano y el mas lejano)
@@ -228,6 +352,18 @@ def filtrar_bordes_disparidad(disparidad, Q, umbral = 8.0, ventana = 5):
     return filtrada
 
 def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000):
+    """
+    Reconstruye puntos en la cámara izquierda rectificada y descarta valores inválidos.
+
+    Parámetros:
+        disparidad (np.ndarray): mapa de disparidad en píxeles.
+        imagen_izq_rectificada (np.ndarray): imagen izquierda rectificada en BGR.
+        Q (np.ndarray): matriz de reproyección 4x4 con escala en mm.
+        prof_max (float): profundidad máxima admitida, sin incluirla, en mm.
+
+    Retorna:
+        tuple: puntos (N, 3) en mm con 0 < Z < prof_max y colores RGB (N, 3) entre 0 y 1.
+    """
     # Pasamos cada pixel (x,y,d) a un punto 3D (X,Y,Z) en mm, en el sistema de coordenadas de la camara izquierda rectificada
     # para ello, usamos la matriz Q obtenida en la rectificacion estereo
     puntos_3d = cv2.reprojectImageTo3D(disparidad, Q)
@@ -252,6 +388,21 @@ def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000)
     return puntos_finales, colores
 
 def graficar_nube_de_puntos(puntos, colores, limites = None, n_puntos = 1000000, elev = -140, azim = -70, titulo = 'Nube de puntos local en el sistema de coordenadas de la cámara izquierda'):
+    """
+    Muestra una muestra aleatoria de la nube con igual escala en los tres ejes.
+
+    Parámetros:
+        puntos (np.ndarray): coordenadas (N, 3) en mm.
+        colores (np.ndarray): colores RGB (N, 3) entre 0 y 1.
+        limites (tuple o None): pares (mínimo, máximo) por eje para recortar la vista.
+        n_puntos (int): cantidad máxima de puntos a dibujar.
+        elev (float): elevación de la vista en grados.
+        azim (float): azimut de la vista en grados.
+        titulo (str): título de la figura.
+
+    Retorna:
+        None: muestra la figura.
+    """
     # Recortamos a una región, solo para visualizar
     # limites = ((x_min, x_max), (y_min, y_max), (z_min, z_max)) en mm
     if limites is not None:
@@ -294,6 +445,18 @@ def graficar_nube_de_puntos(puntos, colores, limites = None, n_puntos = 1000000,
 
 # Ahora, debemos concentrarnos en detectar el objeto de referencia para poder estimar la pose de la camara
 def analizar_charuco(cuadrados = (9, 13), square = 42.00, marker = 31.5, diccionario = cv2.aruco.DICT_5X5_100):
+    """
+    Crea el tablero ChArUco, su versión de marcadores y el detector.
+
+    Parámetros:
+        cuadrados (tuple): cantidad de cuadrados (columnas, filas).
+        square (float): lado de cada cuadrado en mm.
+        marker (float): lado de cada marcador en mm.
+        diccionario (int): identificador del diccionario ArUco de OpenCV.
+
+    Retorna:
+        tuple: CharucoBoard, Board de marcadores y CharucoDetector.
+    """
     dict_ = cv2.aruco.getPredefinedDictionary(diccionario)
     charuco = cv2.aruco.CharucoBoard(cuadrados, square, marker, dict_)
 
@@ -306,6 +469,20 @@ def analizar_charuco(cuadrados = (9, 13), square = 42.00, marker = 31.5, diccion
     return charuco, charuco_marcadores, detector
 
 def estimar_pose_camara(imagen_rectificada, K, charuco, charuco_marcadores, detector, min_esquinas = 10):
+    """
+    Estima la pose mundo-cámara con ChArUco o, como alternativa, con al menos dos marcadores.
+
+    Parámetros:
+        imagen_rectificada (np.ndarray): imagen izquierda rectificada en BGR.
+        K (np.ndarray): matriz intrínseca 3x3 de la cámara rectificada.
+        charuco (cv2.aruco.CharucoBoard): tablero con dimensiones en mm.
+        charuco_marcadores (cv2.aruco.Board): marcadores del mismo tablero.
+        detector (cv2.aruco.CharucoDetector): detector configurado para el tablero.
+        min_esquinas (int): mínimo de esquinas para usar ChArUco.
+
+    Retorna:
+        dict o None: R, vector r en radianes, t en mm, RMS en píxeles, método y número de puntos; None si falla.
+    """
     # Convertimos la imagen a escala de grises porque trabajamos con intensidades
     img_gris = cv2.cvtColor(imagen_rectificada, cv2.COLOR_BGR2GRAY)
     esquinas, ids_esquinas, marcadores, ids_marcadores = detector.detectBoard(img_gris)
@@ -339,12 +516,39 @@ def estimar_pose_camara(imagen_rectificada, K, charuco, charuco_marcadores, dete
             "metodo": metodo, "n_puntos": len(puntos_obj)}
 
 def transformar_nube_a_mundo_optimizada(puntos, R, t):
+    """
+    Lleva los puntos de la cámara al mundo mediante la inversa de la pose.
+
+    Parámetros:
+        puntos (np.ndarray): coordenadas (N, 3) en la cámara, en mm.
+        R (np.ndarray): rotación 3x3 del mundo a la cámara.
+        t (np.ndarray): traslación del mundo a la cámara, en mm.
+
+    Retorna:
+        np.ndarray: puntos (N, 3) en el sistema del tablero, en mm.
+    """
     # solvePnp nos da X_camara = R. X_mundo + t -> X_mundo = R.T . (X_camara - t) -> hacemos la cuenta para todos los puntos a la vez
     # Con los puntos como filas (n, 3): (R.T . (X_camara - t)).T = (X_camara - t).T . R, asi que alcanza con multiplicar por R a derecha
     with np.errstate(divide = "ignore", over = "ignore", invalid = "ignore"):
         return (puntos - t.reshape(1, 3)) @ R
 
 def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_muestras = 100000, largo_eje = 80, elev = 35, azim = -60):
+    """
+    Muestra la nube global y los centros y ejes ópticos de las cámaras.
+
+    Parámetros:
+        nube (np.ndarray): puntos (N, 3) del mundo en mm.
+        colores (np.ndarray): colores RGB (N, 3) entre 0 y 1.
+        poses (list): diccionarios con R y t del mundo a cada cámara.
+        limites (tuple): pares (mínimo, máximo) para los ejes que se recortan, en mm.
+        n_muestras (int): cantidad máxima de puntos a dibujar.
+        largo_eje (float): longitud dibujada del eje óptico en mm.
+        elev (float): elevación de la vista en grados.
+        azim (float): azimut de la vista en grados.
+
+    Retorna:
+        None: muestra la figura.
+    """
     # Recorte a la zona del tablero, solo para visualizar:
     # limites = ((x_min, x_max), (y_min, y_max), (z_min, z_max)) en mm, sistema del ChArUco
     dentro = np.ones(len(nube), dtype = bool)
@@ -385,6 +589,17 @@ def graficar_poses(nube, colores, poses, limites = ((-50, 430), (-50, 600)), n_m
     plt.show()
 
 def draw_geometries(geometries, note = True, **kwargs):
+    """
+    Muestra geometrías de Open3D en el notebook o en una ventana externa.
+
+    Parámetros:
+        geometries (list): nubes, mallas o líneas de Open3D a mostrar.
+        note (bool): True usa Plotly; False abre el visor de Open3D.
+        **kwargs: opciones adicionales para el visor elegido.
+
+    Retorna:
+        None: abre la visualización.
+    """
     if note:
         o3d.visualization.draw_plotly(geometries, **kwargs)
     else:
@@ -393,6 +608,16 @@ def draw_geometries(geometries, note = True, **kwargs):
 
 # Ejercicio 3 ---------------------------------------------------------------------------------------------------------
 def crear_nube_open3d(puntos, colores):
+    """
+    Convierte los puntos y colores a una nube de Open3D.
+
+    Parámetros:
+        puntos (np.ndarray): coordenadas (N, 3) en mm.
+        colores (np.ndarray): colores RGB (N, 3) entre 0 y 1.
+
+    Retorna:
+        o3d.geometry.PointCloud: nueva nube con puntos y colores en float64.
+    """
     # Open3D trabaja con float64, por eso convertimos (nuestras nubes estaban en float32 para ahorrar memoria)
     nube = o3d.geometry.PointCloud()
     nube.points = o3d.utility.Vector3dVector(np.asarray(puntos, dtype = np.float64))
@@ -401,6 +626,17 @@ def crear_nube_open3d(puntos, colores):
     return nube
 
 def crear_caja(centro, extension, angulo_z:int = 0):
+    """
+    Construye una caja orientada a partir de sus ocho esquinas.
+
+    Parámetros:
+        centro (tuple): posición (X, Y, Z) del centro en mm.
+        extension (tuple): dimensiones de la caja en sus tres ejes, en mm.
+        angulo_z (float): rotación alrededor de Z en grados.
+
+    Retorna:
+        o3d.geometry.OrientedBoundingBox: caja para recortar la región de interés.
+    """
     # Caja orientada en el sistema del ChArUco: como la zapatilla está apoyada en diagonal sobre el tablero, alcanza con girarla alrededor de Z
     # centro = (x, y, z) y extension = (largo, ancho, alto) en mm, angulo_z en grados
     a = np.radians(angulo_z)
@@ -419,14 +655,14 @@ def crear_caja(centro, extension, angulo_z:int = 0):
 
 def caja_para_graficar(caja:o3d.geometry.OrientedBoundingBox, color:tuple[float] = (1.0, 0.0, 0.0)) -> o3d.geometry.LineSet:
     """
-    Convierte las 12 aristas de la caja en lineas y les asigna el color rojo, envuelto en el Vector3dVector
-    
+    Convierte las aristas de la caja en líneas del color indicado.
+
     Parámetros:
-        caja(o3d.geometry.OrientedBoundingBox): prisma rectangular imaginario que encierra la zapatilla
-        color(tuple de float): color RGB de las aristas, con valores entre 0 y 1
+        caja (o3d.geometry.OrientedBoundingBox): caja a representar.
+        color (tuple): color RGB entre 0 y 1; rojo por defecto.
 
     Retorna:
-        lineas(o3d.geometry.LineSet): las 8 esquinas de la caja y los 12 segmentos que las unen, pintados del color indicado
+        o3d.geometry.LineSet: aristas de la caja listas para visualizar.
     """
     # Armamos el esqueleto de la caja conectando las 8 esquinas, lo cual "genera" 12 segmentos
     lineas = o3d.geometry.LineSet.create_from_oriented_bounding_box(caja)
@@ -437,13 +673,13 @@ def caja_para_graficar(caja:o3d.geometry.OrientedBoundingBox, color:tuple[float]
 
 def crear_ejes(largo:int = 100) -> o3d.geometry.LineSet:
     """
-    Construye ejes del sistema global (origen en la esquina del ChArUco) como lineas.
-    Para ello, arma 4 puntos: el origen y un punto a largo mm sobre cada eje. Luego, se los une con 3 lineas: X rojo, Y verde, Z azul
+    Construye los ejes globales: X rojo, Y verde y Z azul, desde el origen.
 
     Parámetros:
-        largo(float): distancia en mm del origen a la que se ubica el punto sobre caja eje (largo de cada eje dibujado)
+        largo (float): longitud de cada eje en mm.
+
     Retorna:
-        ejes(o3d.geometry.LineSet): los 4 puntos y los 3 segmentos que forman los ejes X, Y y Z, cada uno con su color
+        o3d.geometry.LineSet: tres segmentos con sus colores.
     """
     # (create_coordinate_frame se cae con numpy 2, por eso los armamos a mano)
     ejes = o3d.geometry.LineSet()
@@ -460,15 +696,14 @@ def crear_ejes(largo:int = 100) -> o3d.geometry.LineSet:
 
 def filtrar_por_caja(nube:o3d.geometry.PointCloud, caja:o3d.geometry.OrientedBoundingBox) -> o3d.geometry.PointCloud:
     """
-    Filtrado espacial: se queda solo con los puntos de la nube que caen dentro de la caja.
-    El resto (mesa, tablero, fondo y ruido) se descarta.
+    Conserva los puntos dentro de la caja, incluidos sus colores, sin modificar la nube original.
 
     Parámetros:
-        nube (o3d.geometry.PointCloud): nube de puntos a filtrar
-        caja (o3d.geometry.OrientedBoundingBox): caja que encierra la zona de interés
-    
+        nube (o3d.geometry.PointCloud): nube de puntos a filtrar.
+        caja (o3d.geometry.OrientedBoundingBox): caja que delimita la región de interés.
+
     Retorna:
-        nube_filtrada (o3d.geometry.PointCloud): nueva nube con solo los puntos de adentro de la caja (con sus colores)
+        o3d.geometry.PointCloud: nueva nube con los puntos del interior de la caja.
     """
     # Lista con las posiciones (indices) de los puntos que caen dentro de la caja
     indices = caja.get_point_indices_within_bounding_box(nube.points)
@@ -477,6 +712,18 @@ def filtrar_por_caja(nube:o3d.geometry.PointCloud, caja:o3d.geometry.OrientedBou
 
 # Opcional: refinamiento de las poses con ICP
 def refinar_con_icp(nube, referencia, distancia_max = 5.0, tam_voxel = 2.0):
+    """
+    Ajusta una nube a la referencia con ICP punto a plano y compara la alineación.
+
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube origen, ya ubicada en el sistema global.
+        referencia (o3d.geometry.PointCloud): nube destino; se agregan normales si faltan.
+        distancia_max (float): límite de distancia entre correspondencias en mm.
+        tam_voxel (float): lado del voxel para submuestrear el origen, en mm.
+
+    Retorna:
+        dict: transformación T (4x4), fitness y RMSE en mm antes y después del ajuste.
+    """
     # Bajamos la resolucion para que ICP sea rapido (la transformacion despues se aplica a la nube completa)
     origen = nube.voxel_down_sample(voxel_size = tam_voxel)
 
@@ -505,6 +752,17 @@ def refinar_con_icp(nube, referencia, distancia_max = 5.0, tam_voxel = 2.0):
             "fitness": fitness, "rmse": rmse}
 
 def evaluar_alineacion(puntos, arbol, distancia_max):
+    """
+    Calcula la proporción de puntos con correspondencia y el RMSE de sus distancias.
+
+    Parámetros:
+        puntos (np.ndarray): coordenadas (N, 3) a evaluar, en mm.
+        arbol (scipy.spatial.cKDTree): árbol de búsqueda de la nube de referencia.
+        distancia_max (float): límite de distancia para aceptar un par, en mm.
+
+    Retorna:
+        tuple: fitness y RMSE en mm; devuelve (0.0, 0.0) si no hay correspondencias.
+    """
     # Para cada punto buscamos el mas cercano de la referencia; los que estan a mas de distancia_max no tienen par
     distancias, _ = arbol.query(puntos, distance_upper_bound = distancia_max)
     con_par = np.isfinite(distancias)
@@ -515,6 +773,21 @@ def evaluar_alineacion(puntos, arbol, distancia_max):
     return con_par.mean(), np.sqrt(np.mean(distancias[con_par] ** 2))
 
 def icp_punto_a_plano(puntos, puntos_ref, normales_ref, arbol, distancia_max, max_iteraciones = 50, tolerancia = 1e-6):
+    """
+    Estima una transformación rígida con ICP punto a plano usando NumPy y un KD-tree.
+
+    Parámetros:
+        puntos (np.ndarray): puntos origen (N, 3) en mm.
+        puntos_ref (np.ndarray): puntos de referencia (M, 3) en mm.
+        normales_ref (np.ndarray): normales (M, 3) de los puntos de referencia.
+        arbol (scipy.spatial.cKDTree): árbol construido con puntos_ref, en el mismo orden.
+        distancia_max (float): límite de distancia entre correspondencias en mm.
+        max_iteraciones (int): cantidad máxima de ajustes.
+        tolerancia (float): umbral de parada sobre la norma del incremento de rotación y traslación.
+
+    Retorna:
+        np.ndarray: transformación 4x4 del origen a la referencia, con traslación en mm.
+    """
     # Busca la transformacion rigida T (4x4) que lleva "puntos" sobre la superficie de la referencia.
     # En cada iteracion: 1) emparejamos cada punto con el mas cercano de la referencia,
     # 2) calculamos el movimiento que minimiza la distancia de cada punto al plano tangente de su par,
@@ -557,6 +830,24 @@ def icp_punto_a_plano(puntos, puntos_ref, normales_ref, arbol, distancia_max, ma
     return T
 
 def alinear_capturas_icp(nubes, colores, poses, caja, error_max_referencia = 1.5, distancia_max = 5.0, tam_voxel = 2.0, traslacion_max = 15.0, rotacion_max = 5.0, print_ = True):
+    """
+    Refina las capturas contra una referencia ChArUco y conserva solo las correcciones aceptadas.
+
+    Parámetros:
+        nubes (list): arrays de puntos (N, 3) en el sistema global, en mm.
+        colores (list): arrays de colores RGB entre 0 y 1, uno por nube.
+        poses (list): poses con índice, método y error de reproyección, en el orden de las nubes.
+        caja (o3d.geometry.OrientedBoundingBox): región utilizada para el ajuste.
+        error_max_referencia (float): límite de RMS en píxeles para formar la referencia ChArUco.
+        distancia_max (float): límite de distancia entre correspondencias en mm.
+        tam_voxel (float): lado del voxel para el ajuste en mm.
+        traslacion_max (float): máxima traslación aceptada en mm.
+        rotacion_max (float): máximo giro aceptado en grados.
+        print_ (bool): indica si se muestran las métricas de cada captura.
+
+    Retorna:
+        tuple: lista de nubes corregidas y lista de métricas con la aceptación de cada ajuste.
+    """
     # Recortamos cada captura a la zona del objeto: el fondo no aporta y el tablero solo, al ser un plano, deja a ICP "deslizarse"
     recortes = [filtrar_por_caja(crear_nube_open3d(n, c), caja) for n, c in zip(nubes, colores)]
 
@@ -596,6 +887,18 @@ def alinear_capturas_icp(nubes, colores, poses, caja, error_max_referencia = 1.5
     return nubes_corregidas, resultados
 
 def graficar_corte(nubes, caja, ancho = 4.0, n_puntos = 50000):
+    """
+    Compara cortes centrales de las nubes en las coordenadas de la caja.
+
+    Parámetros:
+        nubes (dict): nombres y nubes de Open3D a comparar.
+        caja (o3d.geometry.OrientedBoundingBox): referencia para ubicar y orientar el corte.
+        ancho (float): espesor de la franja sobre el primer eje de la caja, en mm.
+        n_puntos (int): cantidad máxima de puntos a dibujar por nube.
+
+    Retorna:
+        None: muestra ancho y altura relativos al centro de la caja.
+    """
     # Corte transversal: nos quedamos con una franja fina en el medio de la caja, a lo ancho del objeto,
     # y la miramos de costado. Si las capturas no estan bien alineadas, la superficie se ve "doble"
     fig, ax = plt.subplots(1, len(nubes), figsize = (7 * len(nubes), 5), sharex = True, sharey = True)
@@ -620,6 +923,20 @@ def graficar_corte(nubes, caja, ancho = 4.0, n_puntos = 50000):
     plt.show()
 
 def optimizar_nube(nube, caja, tam_voxel = 1.0, vecinos = 30, std_ratio = 2.0, print_ = True):
+    """
+    Recorta la nube, aplica submuestreo por voxels y elimina outliers estadísticos.
+
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube original en mm.
+        caja (o3d.geometry.OrientedBoundingBox): región que se conserva.
+        tam_voxel (float): lado de cada voxel en mm.
+        vecinos (int): cantidad de vecinos del filtro estadístico.
+        std_ratio (float): desviaciones estándar permitidas sobre la distancia media global.
+        print_ (bool): indica si se muestra la cantidad de puntos de cada etapa.
+
+    Retorna:
+        dict: nubes de las etapas Original, Caja, Voxel y Outliers.
+    """
     # Guardamos la nube de cada etapa para poder compararlas y reportar los puntos sobrevivientes
     etapas = {"Original": nube}
 
@@ -641,6 +958,18 @@ def optimizar_nube(nube, caja, tam_voxel = 1.0, vecinos = 30, std_ratio = 2.0, p
     return etapas
 
 def graficar_etapas(etapas, n_puntos = 100000, elev = 30, azim = -60):
+    """
+    Compara las etapas de filtrado con una escala común, sin mostrar Original.
+
+    Parámetros:
+        etapas (dict): nombres y nubes de Open3D de cada etapa.
+        n_puntos (int): cantidad máxima de puntos a dibujar por etapa.
+        elev (float): elevación de la vista en grados.
+        azim (float): azimut de la vista en grados.
+
+    Retorna:
+        None: muestra las figuras con la cantidad total de puntos por etapa.
+    """
     # Una vista por etapa (sin la original, que tiene toda la escena), con la misma escala para poder compararlas
     nombres = [nombre for nombre in etapas if nombre != "Original"]
     fig = plt.figure(figsize = (6 * len(nombres), 6))
@@ -674,6 +1003,16 @@ def graficar_etapas(etapas, n_puntos = 100000, elev = 30, azim = -60):
     plt.show()
 
 def exportar_ply(nube, ruta):
+    """
+    Guarda la nube en PLY binario y muestra el tamaño del archivo.
+
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube a exportar.
+        ruta (str): ruta del archivo .ply; crea las carpetas que falten.
+
+    Retorna:
+        None: escribe el archivo en disco.
+    """
     # write_ascii = False -> formato binario, mucho mas liviano que el de texto
     os.makedirs(os.path.dirname(ruta) or ".", exist_ok = True)
     o3d.io.write_point_cloud(ruta, nube, write_ascii = False)
@@ -681,6 +1020,18 @@ def exportar_ply(nube, ruta):
 
 # Opcional: normales y mallado de superficie con Poisson
 def estimar_normales(nube, radio = 6.0, max_vecinos = 30, vecinos_orientacion = 15):
+    """
+    Estima y orienta las normales; modifica la nube recibida.
+
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube en mm, con la parte superior hacia -Z.
+        radio (float): radio de búsqueda de vecinos en mm.
+        max_vecinos (int): máximo de vecinos para estimar cada normal.
+        vecinos_orientacion (int): vecinos usados para hacer coherentes las orientaciones.
+
+    Retorna:
+        o3d.geometry.PointCloud: la misma nube, con normales orientadas hacia -Z en promedio arriba.
+    """
     # La normal de cada punto es la direccion perpendicular al plano que mejor ajusta a sus vecinos
     # (los que estan a menos de radio mm, hasta max_vecinos)
     nube.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius = radio, max_nn = max_vecinos))
@@ -699,6 +1050,21 @@ def estimar_normales(nube, radio = 6.0, max_vecinos = 30, vecinos_orientacion = 
     return nube
 
 def crear_malla_poisson(nube, profundidad = 7, percentil_densidad = 5, caja = None, fraccion_min_componente = 0.01, iteraciones_suavizado = 20, print_ = True):
+    """
+    Genera una malla Poisson, elimina zonas poco respaldadas y fragmentos, y la suaviza.
+
+    Parámetros:
+        nube (o3d.geometry.PointCloud): nube con normales estimadas y orientadas.
+        profundidad (int): profundidad máxima del octree; controla el detalle del mallado.
+        percentil_densidad (float): percentil bajo el que se eliminan vértices de poca densidad.
+        caja (o3d.geometry.OrientedBoundingBox o None): región de recorte opcional.
+        fraccion_min_componente (float): fracción mínima de triángulos por componente para conservarla.
+        iteraciones_suavizado (int): iteraciones de Taubin; 0 desactiva el suavizado.
+        print_ (bool): indica si se muestran los triángulos de cada etapa.
+
+    Retorna:
+        o3d.geometry.TriangleMesh: malla filtrada, con normales de los triángulos y vértices.
+    """
     # Poisson busca una superficie cerrada cuyas normales coincidan con las de la nube.
     # profundidad: niveles del octree que discretiza el espacio. Cada nivel divide las celdas a la mitad, asi que
     # el lado de la celda es aprox. el tamaño del objeto / 2^profundidad. Con mas profundidad hay mas detalle,
@@ -739,6 +1105,16 @@ def crear_malla_poisson(nube, profundidad = 7, percentil_densidad = 5, caja = No
     return malla
 
 def exportar_malla(malla, ruta):
+    """
+    Guarda la malla en PLY binario y muestra el tamaño del archivo.
+
+    Parámetros:
+        malla (o3d.geometry.TriangleMesh): malla a exportar.
+        ruta (str): ruta del archivo .ply; crea las carpetas que falten.
+
+    Retorna:
+        None: escribe el archivo en disco.
+    """
     # Igual que con la nube, formato binario
     os.makedirs(os.path.dirname(ruta) or ".", exist_ok = True)
     o3d.io.write_triangle_mesh(ruta, malla, write_ascii = False)
