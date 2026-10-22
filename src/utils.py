@@ -3,7 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import open3d as o3d
-from scipy.spatial import cKDTree
 
 # Ejercicio 1 ---------------------------------------------------------------------------------------------------------
 def detectar_esquinas(carpeta, esquinas_internas, cuadrado_size_milimetros):
@@ -316,40 +315,6 @@ def probar_sgbm(imagen_izq_rect, imagen_der_rect, num_disparidades, tam_bloque, 
     print("Parámetros probados:", parametros_prueba)
 
     graficar_disparidad(imagen_izq_rect, disparidad_prueba, max_value = 256)
-
-def filtrar_bordes_disparidad(disparidad, Q, umbral = 8.0, ventana = 5):
-    """
-    Marca con -1 las disparidades próximas a saltos grandes de profundidad.
-
-    Parámetros:
-        disparidad (np.ndarray): mapa de disparidad en píxeles.
-        Q (np.ndarray): matriz de reproyección 4x4 con escala en mm.
-        umbral (float): diferencia máxima de profundidad en la ventana, en mm.
-        ventana (int): lado de la ventana de comparación en píxeles.
-
-    Retorna:
-        np.ndarray: copia del mapa con los píxeles descartados marcados como inválidos.
-    """
-    # En los bordes de los objetos SGBM mezcla el fondo con el frente y da disparidades intermedias: esos pixeles
-    # quedan como puntos "flotantes" entre el objeto y lo que esta detras. Los detectamos como pixeles cuya
-    # profundidad cambia mucho dentro de una ventana chica (mas de umbral mm entre el mas cercano y el mas lejano)
-    validos = disparidad > 0
-
-    # Profundidad de cada pixel a partir de Q: Z = Q[2,3] / (Q[3,2] * d + Q[3,3])
-    Z = np.zeros_like(disparidad, dtype = np.float32)
-    Z[validos] = Q[2, 3] / (Q[3, 2] * disparidad[validos] + Q[3, 3])
-
-    # Maxima y minima profundidad en la ventana alrededor de cada pixel (dilatacion y erosion).
-    # Los pixeles invalidos no deben contar: valen 0 para el maximo y un valor enorme para el minimo
-    nucleo = np.ones((ventana, ventana), np.uint8)
-    Z_max = cv2.dilate(Z, nucleo)
-    Z_min = cv2.erode(np.where(validos, Z, 1e9).astype(np.float32), nucleo)
-
-    # Marcamos como invalidos (disparidad negativa, igual que SGBM) los pixeles en un salto de profundidad
-    filtrada = disparidad.copy()
-    filtrada[validos & (Z_max - Z_min > umbral)] = -1
-
-    return filtrada
 
 def nube_de_puntos_local(disparidad, imagen_izq_rectificada, Q, prof_max = 1000):
     """
@@ -713,7 +678,7 @@ def filtrar_por_caja(nube:o3d.geometry.PointCloud, caja:o3d.geometry.OrientedBou
 # Opcional: refinamiento de las poses con ICP
 def refinar_con_icp(nube, referencia, distancia_max = 5.0, tam_voxel = 2.0):
     """
-    Ajusta una nube a la referencia con ICP punto a plano y compara la alineación.
+    Ajusta una nube a la referencia con ICP punto a plano de Open3D y compara la alineación.
 
     Parámetros:
         nube (o3d.geometry.PointCloud): nube origen, ya ubicada en el sistema global.
@@ -731,196 +696,18 @@ def refinar_con_icp(nube, referencia, distancia_max = 5.0, tam_voxel = 2.0):
     if not referencia.has_normals():
         referencia.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius = 3 * tam_voxel, max_nn = 30))
 
-    # Las funciones de registro de Open3D (registration_icp, evaluate_registration) se caen con numpy 2,
-    # asi que implementamos ICP con numpy, usando un KD-tree de scipy para buscar el vecino mas cercano
-    puntos_origen = np.asarray(origen.points)
-    puntos_ref, normales_ref = np.asarray(referencia.points), np.asarray(referencia.normals)
-    arbol = cKDTree(puntos_ref)
-
     # Calidad de la alineacion antes de ICP: la nube ya esta en el sistema del ChArUco, asi que partimos de la identidad
-    fitness_antes, rmse_antes = evaluar_alineacion(puntos_origen, arbol, distancia_max)
+    antes = o3d.pipelines.registration.evaluate_registration(origen, referencia, distancia_max, np.eye(4))
 
     # Solo se emparejan puntos a menos de distancia_max mm, por eso ICP solo corrige desfasajes chicos
-    T = icp_punto_a_plano(puntos_origen, puntos_ref, normales_ref, arbol, distancia_max, max_iteraciones = 50)
-
-    puntos_alineados = puntos_origen @ T[:3, :3].T + T[:3, 3]
-    fitness, rmse = evaluar_alineacion(puntos_alineados, arbol, distancia_max)
+    despues = o3d.pipelines.registration.registration_icp(
+        origen, referencia, distancia_max, np.eye(4),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane())
 
     # fitness: fraccion de puntos que encontraron un par, rmse: distancia media (en mm) entre los pares
-    return {"T": T,
-            "fitness_antes": fitness_antes, "rmse_antes": rmse_antes,
-            "fitness": fitness, "rmse": rmse}
-
-def evaluar_alineacion(puntos, arbol, distancia_max):
-    """
-    Calcula la proporción de puntos con correspondencia y el RMSE de sus distancias.
-
-    Parámetros:
-        puntos (np.ndarray): coordenadas (N, 3) a evaluar, en mm.
-        arbol (scipy.spatial.cKDTree): árbol de búsqueda de la nube de referencia.
-        distancia_max (float): límite de distancia para aceptar un par, en mm.
-
-    Retorna:
-        tuple: fitness y RMSE en mm; devuelve (0.0, 0.0) si no hay correspondencias.
-    """
-    # Para cada punto buscamos el mas cercano de la referencia; los que estan a mas de distancia_max no tienen par
-    distancias, _ = arbol.query(puntos, distance_upper_bound = distancia_max)
-    con_par = np.isfinite(distancias)
-    if not con_par.any():
-        return 0.0, 0.0
-
-    # fitness: fraccion de puntos con par, rmse: raiz del error cuadratico medio de esos pares (mm)
-    return con_par.mean(), np.sqrt(np.mean(distancias[con_par] ** 2))
-
-def icp_punto_a_plano(puntos, puntos_ref, normales_ref, arbol, distancia_max, max_iteraciones = 50, tolerancia = 1e-6):
-    """
-    Estima una transformación rígida con ICP punto a plano usando NumPy y un KD-tree.
-
-    Parámetros:
-        puntos (np.ndarray): puntos origen (N, 3) en mm.
-        puntos_ref (np.ndarray): puntos de referencia (M, 3) en mm.
-        normales_ref (np.ndarray): normales (M, 3) de los puntos de referencia.
-        arbol (scipy.spatial.cKDTree): árbol construido con puntos_ref, en el mismo orden.
-        distancia_max (float): límite de distancia entre correspondencias en mm.
-        max_iteraciones (int): cantidad máxima de ajustes.
-        tolerancia (float): umbral de parada sobre la norma del incremento de rotación y traslación.
-
-    Retorna:
-        np.ndarray: transformación 4x4 del origen a la referencia, con traslación en mm.
-    """
-    # Busca la transformacion rigida T (4x4) que lleva "puntos" sobre la superficie de la referencia.
-    # En cada iteracion: 1) emparejamos cada punto con el mas cercano de la referencia,
-    # 2) calculamos el movimiento que minimiza la distancia de cada punto al plano tangente de su par,
-    # 3) aplicamos ese movimiento y repetimos hasta que deja de cambiar
-    T = np.eye(4)
-    actuales = puntos.copy()
-
-    for _ in range(max_iteraciones):
-        # 1) Correspondencias (solo pares a menos de distancia_max mm)
-        distancias, indices = arbol.query(actuales, distance_upper_bound = distancia_max)
-        con_par = np.isfinite(distancias)
-        if con_par.sum() < 6:
-            break
-        p, q, n = actuales[con_par], puntos_ref[indices[con_par]], normales_ref[indices[con_par]]
-
-        # Centramos para que el sistema este bien condicionado (las coordenadas son de cientos de mm)
-        centro = p.mean(axis = 0)
-        p_c, q_c = p - centro, q - centro
-
-        # 2) Error punto a plano: ((R p + t - q) · n). Para rotaciones chicas R ≈ I + [w]x, y queda lineal en (w, t):
-        #    (p x n) · w + n · t = (q - p) · n  ->  lo resolvemos por cuadrados minimos
-        A = np.hstack([np.cross(p_c, n), n])
-        b = np.sum((q_c - p_c) * n, axis = 1)
-        x, *_ = np.linalg.lstsq(A, b, rcond = None)
-        w, t = x[:3], x[3:]
-
-        # Rotacion a partir del vector w (forma de Rodrigues), aplicada alrededor del centro
-        R_inc, _ = cv2.Rodrigues(w)
-        t_inc = centro + t - R_inc @ centro
-
-        # 3) Aplicamos el incremento y lo acumulamos en T
-        actuales = actuales @ R_inc.T + t_inc
-        T_inc = np.eye(4)
-        T_inc[:3, :3], T_inc[:3, 3] = R_inc, t_inc
-        T = T_inc @ T
-
-        if np.linalg.norm(x) < tolerancia:
-            break
-
-    return T
-
-def alinear_capturas_icp(nubes, colores, poses, caja, error_max_referencia = 1.5, distancia_max = 5.0, tam_voxel = 2.0, traslacion_max = 15.0, rotacion_max = 5.0, print_ = True):
-    """
-    Refina las capturas contra una referencia ChArUco y conserva solo las correcciones aceptadas.
-
-    Parámetros:
-        nubes (list): arrays de puntos (N, 3) en el sistema global, en mm.
-        colores (list): arrays de colores RGB entre 0 y 1, uno por nube.
-        poses (list): poses con índice, método y error de reproyección, en el orden de las nubes.
-        caja (o3d.geometry.OrientedBoundingBox): región utilizada para el ajuste.
-        error_max_referencia (float): límite de RMS en píxeles para formar la referencia ChArUco.
-        distancia_max (float): límite de distancia entre correspondencias en mm.
-        tam_voxel (float): lado del voxel para el ajuste en mm.
-        traslacion_max (float): máxima traslación aceptada en mm.
-        rotacion_max (float): máximo giro aceptado en grados.
-        print_ (bool): indica si se muestran las métricas de cada captura.
-
-    Retorna:
-        tuple: lista de nubes corregidas y lista de métricas con la aceptación de cada ajuste.
-    """
-    # Recortamos cada captura a la zona del objeto: el fondo no aporta y el tablero solo, al ser un plano, deja a ICP "deslizarse"
-    recortes = [filtrar_por_caja(crear_nube_open3d(n, c), caja) for n, c in zip(nubes, colores)]
-
-    # Referencia: unimos las capturas mas confiables (esquinas ChArUco con error de reproyeccion bajo)
-    referencia = o3d.geometry.PointCloud()
-    for recorte, pose in zip(recortes, poses):
-        if pose["metodo"] == "charuco" and pose["error_reproyeccion"] < error_max_referencia:
-            referencia += recorte
-    referencia = referencia.voxel_down_sample(voxel_size = tam_voxel)
-
-    nubes_corregidas, resultados = [], []
-    for nube, recorte, pose in zip(nubes, recortes, poses):
-        resultado = refinar_con_icp(recorte, referencia, distancia_max, tam_voxel)
-
-        # Tamaño de la correccion: cuanto se movio la nube y cuanto giro (angulo de la rotacion a partir de su traza)
-        T = resultado["T"]
-        resultado["traslacion"] = np.linalg.norm(T[:3, 3])
-        resultado["rotacion"] = np.degrees(np.arccos(np.clip((np.trace(T[:3, :3]) - 1) / 2, -1, 1)))
-
-        # Aceptamos la correccion solo si mejora la alineacion (mas puntos con par y a menor distancia) y si es chica:
-        # ICP es un refinamiento de la pose de solvePnP, una correccion grande indica que convergio a una solucion equivocada
-        mejora = resultado["fitness"] >= resultado["fitness_antes"] and resultado["rmse"] <= resultado["rmse_antes"]
-        chica = resultado["traslacion"] <= traslacion_max and resultado["rotacion"] <= rotacion_max
-        resultado["aceptada"] = mejora and chica
-        if not resultado["aceptada"]:
-            T = np.eye(4)
-
-        # Aplicamos la correccion a la nube completa: X' = R . X + t, con los puntos como filas
-        nubes_corregidas.append((nube @ T[:3, :3].T + T[:3, 3]).astype(np.float32))
-        resultados.append({"indice": pose["indice"], "metodo": pose["metodo"], **resultado})
-
-        if print_:
-            print(f"Captura {pose['indice']} ({pose['metodo']}): fitness {resultado['fitness_antes']:.2f} -> {resultado['fitness']:.2f}, "
-                  f"rmse {resultado['rmse_antes']:.2f} -> {resultado['rmse']:.2f} mm, "
-                  f"correccion {resultado['traslacion']:.1f} mm y {resultado['rotacion']:.2f}°{'' if resultado['aceptada'] else ' (descartada)'}")
-
-    return nubes_corregidas, resultados
-
-def graficar_corte(nubes, caja, ancho = 4.0, n_puntos = 50000):
-    """
-    Compara cortes centrales de las nubes en las coordenadas de la caja.
-
-    Parámetros:
-        nubes (dict): nombres y nubes de Open3D a comparar.
-        caja (o3d.geometry.OrientedBoundingBox): referencia para ubicar y orientar el corte.
-        ancho (float): espesor de la franja sobre el primer eje de la caja, en mm.
-        n_puntos (int): cantidad máxima de puntos a dibujar por nube.
-
-    Retorna:
-        None: muestra ancho y altura relativos al centro de la caja.
-    """
-    # Corte transversal: nos quedamos con una franja fina en el medio de la caja, a lo ancho del objeto,
-    # y la miramos de costado. Si las capturas no estan bien alineadas, la superficie se ve "doble"
-    fig, ax = plt.subplots(1, len(nubes), figsize = (7 * len(nubes), 5), sharex = True, sharey = True)
-    ax = np.atleast_1d(ax)
-
-    for a, (nombre, nube) in zip(ax, nubes.items()):
-        # Pasamos los puntos al sistema de la caja: eje 0 a lo largo, eje 1 a lo ancho, eje 2 en altura
-        puntos = (np.asarray(nube.points) - caja.center) @ caja.R
-        colores = np.asarray(nube.colors)
-        franja = np.abs(puntos[:, 0]) < ancho / 2
-
-        indices = np.flatnonzero(franja)
-        indices = np.random.choice(indices, min(n_puntos, len(indices)), replace = False)
-
-        a.scatter(puntos[indices, 1], -puntos[indices, 2], c = colores[indices], s = 1)
-        a.set_aspect("equal")
-        a.set_xlabel("Ancho (mm)")
-        a.set_ylabel("Altura (mm, desde el centro de la caja)")
-        a.set_title(f"{nombre}: corte de {ancho:.0f} mm")
-
-    plt.tight_layout()
-    plt.show()
+    return {"T": despues.transformation,
+            "fitness_antes": antes.fitness, "rmse_antes": antes.inlier_rmse,
+            "fitness": despues.fitness, "rmse": despues.inlier_rmse}
 
 def optimizar_nube(nube, caja, tam_voxel = 1.0, vecinos = 30, std_ratio = 2.0, print_ = True):
     """
@@ -1049,21 +836,19 @@ def estimar_normales(nube, radio = 6.0, max_vecinos = 30, vecinos_orientacion = 
 
     return nube
 
-def crear_malla_poisson(nube, profundidad = 7, percentil_densidad = 5, caja = None, fraccion_min_componente = 0.01, iteraciones_suavizado = 20, print_ = True):
+def crear_malla_poisson(nube, profundidad = 7, percentil_densidad = 5, caja = None, print_ = True):
     """
-    Genera una malla Poisson, elimina zonas poco respaldadas y fragmentos, y la suaviza.
+    Genera una malla Poisson y elimina las zonas poco respaldadas por puntos.
 
     Parámetros:
         nube (o3d.geometry.PointCloud): nube con normales estimadas y orientadas.
         profundidad (int): profundidad máxima del octree; controla el detalle del mallado.
         percentil_densidad (float): percentil bajo el que se eliminan vértices de poca densidad.
         caja (o3d.geometry.OrientedBoundingBox o None): región de recorte opcional.
-        fraccion_min_componente (float): fracción mínima de triángulos por componente para conservarla.
-        iteraciones_suavizado (int): iteraciones de Taubin; 0 desactiva el suavizado.
         print_ (bool): indica si se muestran los triángulos de cada etapa.
 
     Retorna:
-        o3d.geometry.TriangleMesh: malla filtrada, con normales de los triángulos y vértices.
+        o3d.geometry.TriangleMesh: malla filtrada, con normales de los vértices.
     """
     # Poisson busca una superficie cerrada cuyas normales coincidan con las de la nube.
     # profundidad: niveles del octree que discretiza el espacio. Cada nivel divide las celdas a la mitad, asi que
@@ -1085,19 +870,6 @@ def crear_malla_poisson(nube, profundidad = 7, percentil_densidad = 5, caja = No
         malla = malla.crop(caja)
         if print_:
             print(f"Recorte con la caja: {len(malla.triangles):,} triangulos")
-
-    # Eliminamos los pedazos sueltos: componentes conexas con menos del fraccion_min_componente de los triangulos
-    componentes, triangulos_por_componente, _ = malla.cluster_connected_triangles()
-    componentes, triangulos_por_componente = np.asarray(componentes), np.asarray(triangulos_por_componente)
-    malla.remove_triangles_by_mask(triangulos_por_componente[componentes] < fraccion_min_componente * len(malla.triangles))
-    malla.remove_unreferenced_vertices()
-    if print_:
-        print(f"Sin componentes chicas: {len(malla.triangles):,} triangulos")
-
-    # Suavizado de Taubin: alterna un paso que acerca cada vertice al promedio de sus vecinos y otro que lo aleja un poco,
-    # asi suaviza las irregularidades chicas sin "encoger" la malla (como si pasa con el suavizado laplaciano)
-    if iteraciones_suavizado > 0:
-        malla = malla.filter_smooth_taubin(number_of_iterations = iteraciones_suavizado)
 
     # Normales de la malla, para que se vea con iluminacion
     malla.compute_vertex_normals()

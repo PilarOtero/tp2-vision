@@ -35,10 +35,9 @@ Probado con **Python 3.9** en macOS (Apple Silicon). Las versiones exactas está
 
 | Paquete | Versión |
 |---|---|
-| numpy | 2.0.2 |
+| numpy | 1.26.4 |
 | opencv-python | 4.10.0.84 |
 | open3d | 0.18.0 |
-| scipy | 1.13.1 |
 | matplotlib | 3.9.4 |
 | plotly | 7.1.0 |
 | nbformat | 5.10.4 |
@@ -72,16 +71,9 @@ Las nubes de puntos se visualizan dentro del notebook con plotly (`draw_plotly`)
 | 2. Nube local | `reprojectImageTo3D` con la matriz Q: nube en el sistema de la cámara izquierda rectificada, en mm. | `nube_de_puntos_local` |
 | 2. Pose global | Detección del ChArUco (9×13, cuadrado de 42 mm, marcador de 31,5 mm, `DICT_5X5_100`) y `solvePnP` + `Rodrigues`. Se descartan las capturas con error de reproyección de la pose mayor a 3 px. | `analizar_charuco`, `estimar_pose_camara`, `transformar_nube_a_mundo_optimizada`, `graficar_poses` |
 | 3. Fusión y optimización | Unión de las nubes en el sistema del ChArUco, recorte con una caja orientada, `voxel_down_sample` y `remove_statistical_outlier`. | `crear_nube_open3d`, `crear_caja`, `filtrar_por_caja`, `optimizar_nube` |
-| 3. Opcionales | Refinamiento de las poses con ICP, estimación de normales y malla de Poisson. | `alinear_capturas_icp`, `estimar_normales`, `crear_malla_poisson` |
+| 3. Opcionales | Refinamiento de las poses con ICP, estimación de normales y malla de Poisson. | `refinar_con_icp`, `estimar_normales`, `crear_malla_poisson` |
 | 5. Medición | Altura de la zapatilla respecto del plano del tablero (Z = 0). | celdas finales del notebook |
 
-## Nota sobre numpy 2 y Open3D
+## Nota sobre numpy y Open3D
 
-Open3D 0.18 (la última versión disponible para Python 3.9) está compilado para numpy 1.x. Con numpy 2, algunas funciones de Open3D terminan el proceso con un *segmentation fault* cuando reciben arrays de numpy de forma directa. Para que el notebook funcione con numpy 2:
-
-- La caja se construye a partir de sus 8 esquinas con `OrientedBoundingBox.create_from_points` (`crear_caja`), en lugar del constructor `OrientedBoundingBox(centro, R, extension)`.
-- Los ejes del sistema global y la caja se dibujan como `LineSet` (`crear_ejes`, `caja_para_graficar`), en lugar de `create_coordinate_frame` y `caja.color`.
-- El ICP está implementado con numpy y `scipy.spatial.cKDTree` (`icp_punto_a_plano`, `evaluar_alineacion`), porque `registration_icp` y `evaluate_registration` no funcionan.
-- Los colores siempre se pasan a Open3D envueltos en `o3d.utility.Vector3dVector`.
-
-En Mac, numpy 2 también puede mostrar avisos `RuntimeWarning: divide by zero / overflow encountered in matmul` en productos de matrices. Son falsos (un problema de la librería Accelerate) y no afectan los resultados.
+Open3D 0.18 (la última versión disponible para Python 3.9 en Mac con Apple Silicon) está compilado para numpy 1.x. Con numpy 2, varias funciones de Open3D, entre ellas `registration_icp` y `evaluate_registration`, terminan el proceso con un *segmentation fault*. Por eso fijamos `numpy==1.26.4`. Con Python 3.10 o superior también se puede usar `open3d==0.19.0`, que es compatible con numpy 2.
